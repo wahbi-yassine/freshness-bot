@@ -28,6 +28,7 @@ jobs:
         env:
           WP_URL: ${{ secrets.WP_URL }}
           WP_USER: ${{ secrets.WP_USER }}
-          WP_PASSWORD: ${{ secrets.WP_PASSWORD }}
+          WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
+          WP_JWT_TOKEN: ${{ secrets.WP_JWT_TOKEN }}
           FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
         run: python bot.py
