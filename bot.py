@@ -1,28 +1,47 @@
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 
+# --- WordPress REST API ---
 WP_API = os.environ["WP_URL"].rstrip("/") + "/wp-json/wp/v2"
 WP_AUTH = (os.environ["WP_USER"], os.environ["WP_PASSWORD"])
 
-API_KEY = os.environ["FOOTBALL_API_KEY"]
+# --- API-Football from dashboard.api-football.com ---
+API_KEY = os.environ.get("FOOTBALL_API_KEY", "").strip()
+
 HEADERS = {
-    "x-rapidapi-host": "api-football-v1.p.rapidapi.com",
-    "x-rapidapi-key": API_KEY,
+    "x-apisports-key": API_KEY
 }
 
 def get_fixtures():
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
-    r = requests.get(url, headers=HEADERS, params={"date": today}, timeout=30)
+    # Today UTC
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    if not API_KEY:
+        raise RuntimeError("FOOTBALL_API_KEY is missing or empty.")
+
+    # Current new API-Football endpoint (modern version)
+    url = "https://v3.football.api-sports.io/fixtures"
+    params = {"date": today}
+
+    r = requests.get(url, headers=HEADERS, params=params, timeout=30)
+
+    if r.status_code in (401, 403):
+        raise RuntimeError(
+            f"Football API auth failed {r.status_code}: {r.text}"
+        )
+
     r.raise_for_status()
-    return r.json().get("response", [])
+    data = r.json()
+
+    # The new API returns fixtures under data["response"]
+    return data.get("response", [])
 
 def get_post_id_by_slug(slug):
     r = requests.get(f"{WP_API}/posts", params={"slug": slug}, auth=WP_AUTH, timeout=30)
     r.raise_for_status()
-    data = r.json()
-    return data[0]["id"] if data else None
+    results = r.json()
+    return results[0]["id"] if results else None
 
 def create_or_update_post(match):
     match_id = match["fixture"]["id"]
@@ -32,7 +51,7 @@ def create_or_update_post(match):
     away = match["teams"]["away"]["name"]
     date = match["fixture"]["date"]
     status = match["fixture"]["status"]["long"]
-    venue = match.get("fixture", {}).get("venue", {}).get("name") or "TBD"
+    venue = match["fixture"].get("venue", {}).get("name", "TBD")
 
     title = f"{home} vs {away} Live Score & Updates"
     content = f"""
@@ -43,7 +62,7 @@ def create_or_update_post(match):
   <li><strong>Status:</strong> {status}</li>
   <li><strong>Stadium:</strong> {venue}</li>
 </ul>
-<p>Live updates for the {home} vs {away} match. Check back for confirmed lineups and live scores.</p>
+<p>Live score and update content automatically published.</p>
 """
 
     post_data = {
@@ -55,19 +74,19 @@ def create_or_update_post(match):
     }
 
     existing_id = get_post_id_by_slug(slug)
-
     if existing_id:
         print(f"Updating {slug} (post id {existing_id})")
-        r = requests.post(f"{WP_API}/posts/{existing_id}", json=post_data, auth=WP_AUTH, timeout=30)
+        r = requests.post(f"{WP_API}/posts/{existing_id}", json=post_data, auth=WP_AUTH)
         r.raise_for_status()
     else:
         print(f"Creating {slug}")
-        r = requests.post(f"{WP_API}/posts", json=post_data, auth=WP_AUTH, timeout=30)
+        r = requests.post(f"{WP_API}/posts", json=post_data, auth=WP_AUTH)
         r.raise_for_status()
 
 def main():
     print("Starting freshness run...")
     fixtures = get_fixtures()
+    print(f"Fetched {len(fixtures)} fixtures for today.")
 
     for match in fixtures[:5]:
         create_or_update_post(match)
