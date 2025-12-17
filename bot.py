@@ -5,34 +5,36 @@ import time
 from datetime import datetime, timezone
 
 # =====================================================
-# WORDPRESS CONFIG (APP PASSWORD ONLY)
+# 1. CONFIGURATION & AUTHENTICATION
 # =====================================================
+
+# WordPress Config (From GitHub Secrets)
 WP_BASE = os.environ["WP_URL"].rstrip("/")
 WP_API = WP_BASE + "/wp-json/wp/v2"
-
 WP_USER = os.environ.get("WP_USER", "").strip()
 WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
 
-# =====================================================
-# API-FOOTBALL
-# =====================================================
+# API-Football Config (From GitHub Secrets)
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY", "").strip()
 FOOTBALL_API_URL = "https://v3.football.api-sports.io/fixtures"
 
-# League IDs for filtering (Optional)
-# 39=Premier League, 140=La Liga, 135=Serie A, 78=Bundesliga, 61=Ligue 1, 2=UCL
-PRIORITY_LEAGUES = [39, 140, 135, 78, 61, 2] 
+# LEAGUE FILTERS: Add the IDs of leagues you want to publish.
+# 39=Premier League, 140=La Liga, 135=Serie A, 78=Bundesliga, 61=Ligue 1, 2=UCL, 200=Botola Pro
+PRIORITY_LEAGUES = [39, 140, 135, 78, 61, 2, 200]
 
+# Setup Requests Session
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "freshness-bot/4.0",
+    "User-Agent": "freshness-bot/5.0",
     "Accept": "application/json",
 })
 
 # =====================================================
-# SAFE ENV CHECK & AUTH
+# 2. HELPER FUNCTIONS (Auth & Checks)
 # =====================================================
+
 def print_env_status():
+    """Prints status of secrets (True/False) without revealing them."""
     print("ENV CHECK:")
     print(" - WP_URL:", bool(WP_BASE))
     print(" - WP_USER:", bool(WP_USER))
@@ -40,12 +42,13 @@ def print_env_status():
     print(" - FOOTBALL_API_KEY:", bool(FOOTBALL_API_KEY))
 
 def assert_auth_config():
+    """Stops the script if secrets are missing."""
     if not (WP_USER and WP_APP_PASSWORD):
-        raise RuntimeError(
-            "Missing WordPress auth. Set WP_USER and WP_APP_PASSWORD."
-        )
+        raise RuntimeError("Missing WordPress auth. Check GitHub Secrets.")
 
 def basic_auth_header(user: str, app_pw: str) -> str:
+    """Generates the Basic Auth header for WordPress."""
+    # Remove spaces that WordPress sometimes adds to app passwords
     app_pw = app_pw.replace(" ", "")
     token = base64.b64encode(f"{user}:{app_pw}".encode("utf-8")).decode("utf-8")
     return f"Basic {token}"
@@ -57,6 +60,7 @@ def wp_headers():
     }
 
 def wp_request(method: str, path: str, *, params=None, json=None, timeout=30):
+    """Handles all requests to WordPress with retries and error checking."""
     url = f"{WP_API}/{path.lstrip('/')}"
     
     for attempt in range(3):
@@ -70,12 +74,14 @@ def wp_request(method: str, path: str, *, params=None, json=None, timeout=30):
                 timeout=timeout,
             )
             
+            # Retry on server errors
             if r.status_code in (429, 500, 502, 503, 504):
                 time.sleep(2)
                 continue
                 
+            # Log Auth Errors specifically
             if r.status_code in (401, 403):
-                print(f"Auth Error: {r.status_code} - {r.text[:200]}")
+                print(f"Auth Error ({r.status_code}): {r.text[:200]}")
             
             r.raise_for_status()
             return r
@@ -85,20 +91,22 @@ def wp_request(method: str, path: str, *, params=None, json=None, timeout=30):
             time.sleep(2)
 
 def test_wp_auth():
+    """Verifies connection before doing real work."""
     r = wp_request("GET", "/users/me")
-    print(f"WP Auth OK: {r.json().get('name')}")
+    print(f"WP Auth OK: Connected as '{r.json().get('name')}'")
 
 # =====================================================
-# FETCH FIXTURES
+# 3. GET DATA (API-Football)
 # =====================================================
+
 def get_fixtures():
+    """Fetches today's matches from API-Football."""
     if not FOOTBALL_API_KEY:
         raise RuntimeError("Missing FOOTBALL_API_KEY")
 
     headers = {"x-apisports-key": FOOTBALL_API_KEY}
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-    # Fetch all matches for today
     r = requests.get(
         FOOTBALL_API_URL,
         headers=headers,
@@ -109,31 +117,38 @@ def get_fixtures():
     return r.json().get("response", [])
 
 # =====================================================
-# CREATE / UPDATE POST (PRO VERSION)
+# 4. CREATE / UPDATE POSTS
 # =====================================================
+
 def get_post_id_by_slug(slug: str):
+    """Checks if a post already exists by slug."""
     r = wp_request("GET", "/posts", params={"slug": slug})
     posts = r.json()
     return posts[0]["id"] if posts else None
 
 def create_or_update_post(match):
+    """Generates HTML, Schema, and sends to WordPress."""
     match_id = match["fixture"]["id"]
     slug = f"match-{match_id}"
 
-    # 1. EXTRACT DATA
+    # --- A. DATA EXTRACTION ---
     home = match["teams"]["home"]["name"]
     away = match["teams"]["away"]["name"]
     home_logo = match["teams"]["home"]["logo"]
     away_logo = match["teams"]["away"]["logo"]
     
-    venue = match.get("fixture", {}).get("venue", {}).get("name", "TBD")
+    # Handle missing venue
+    venue_data = match.get("fixture", {}).get("venue", {})
+    venue = venue_data.get("name") if venue_data.get("name") else "Stadium TBD"
+    
     date_iso = match["fixture"]["date"]
     status_long = match["fixture"]["status"]["long"]
     league_name = match["league"]["name"]
     round_name = match["league"]["round"]
 
-    # 2. GENERATE JSON-LD SCHEMA (SEO)
-    schema_markup = f"""
+    # --- B. SEO SCHEMA (HIDDEN) ---
+    # This block uses to keep the JSON code invisible to visitors
+    schema_block = f"""
     <script type="application/ld+json">
     {{
       "@context": "https://schema.org",
@@ -150,46 +165,50 @@ def create_or_update_post(match):
     </script>
     """
 
-    # 3. BUILD HTML (Visual Layout for Kadence)
-    html_content = f"""
-    {schema_markup}
-    <div class="wp-block-group" style="text-align:center; padding:20px; background:#f5f5f5; border-radius:8px;">
-        <div class="wp-block-columns">
-            <div class="wp-block-column">
-                <img src="{home_logo}" alt="{home}" width="80" height="80"/>
-                <h3>{home}</h3>
+    # --- C. VISUAL CONTENT (WordPress Blocks) ---
+    visual_block = f"""
+    <h2 class="wp-block-heading has-text-align-center">{home} vs {away}</h2>
+    <div class="wp-block-columns is-vertically-aligned-center has-background" style="background-color:#f7f7f7;padding-top:20px;padding-bottom:20px">
+        
+        <div class="wp-block-column is-vertically-aligned-center" style="flex-basis:33%">
+            <figure class="wp-block-image aligncenter size-full is-resized"><img src="{home_logo}" alt="{home} Logo" width="80" height="80"/></figure>
+            <p class="has-text-align-center" style="font-style:normal;font-weight:700">{home}</p>
             </div>
-            <div class="wp-block-column is-vertically-aligned-center">
-                <h2 style="color:#444;">VS</h2>
-                <p><strong>{status_long}</strong></p>
+        <div class="wp-block-column is-vertically-aligned-center" style="flex-basis:33%">
+            <p class="has-text-align-center" style="font-size:24px;font-weight:800">VS</p>
+            <p class="has-text-align-center has-vivid-red-color has-text-color">{status_long}</p>
             </div>
-            <div class="wp-block-column">
-                <img src="{away_logo}" alt="{away}" width="80" height="80"/>
-                <h3>{away}</h3>
-            </div>
+        <div class="wp-block-column is-vertically-aligned-center" style="flex-basis:33%">
+            <figure class="wp-block-image aligncenter size-full is-resized"><img src="{away_logo}" alt="{away} Logo" width="80" height="80"/></figure>
+            <p class="has-text-align-center" style="font-weight:700">{away}</p>
             </div>
         </div>
-    <h3>Match Info</h3>
-    <ul>
-        <li><strong>League:</strong> {league_name} - {round_name}</li>
-        <li><strong>Date:</strong> {date_iso}</li>
-        <li><strong>Venue:</strong> {venue}</li>
-    </ul>
+    <hr class="wp-block-separator has-alpha-channel-opacity"/>
+    <div class="wp-block-group">
+        <h3 class="wp-block-heading">Match Details</h3>
+        <ul>
+            <li><strong>🏆 League:</strong> {league_name} ({round_name})</li>
+            <li><strong>📅 Date:</strong> {date_iso}</li>
+            <li><strong>🏟️ Stadium:</strong> {venue}</li>
+        </ul>
+        </div>
     """
 
-    # 4. PREPARE PAYLOAD
+    # Combine blocks
+    full_content = schema_block + visual_block
+
     payload = {
         "title": f"{home} vs {away} - Live Updates",
         "slug": slug,
         "status": "publish",
         "comment_status": "closed",
-        "content": html_content,
+        "content": full_content,
         "meta": {
             "match_id": match_id,
         }
     }
 
-    # 5. PUSH TO WORDPRESS
+    # --- D. API PUSH ---
     existing_id = get_post_id_by_slug(slug)
     if existing_id:
         print(f"Updating: {home} vs {away} (ID: {existing_id})")
@@ -199,36 +218,44 @@ def create_or_update_post(match):
         wp_request("POST", "/posts", json=payload)
 
 # =====================================================
-# MAIN LOOP
+# 5. MAIN EXECUTION FLOW
 # =====================================================
+
 def main():
-    print("Starting freshness run...")
+    print("--- STARTING FRESHNESS BOT ---")
     print_env_status()
     assert_auth_config()
     test_wp_auth()
 
+    # 1. Fetch
     fixtures = get_fixtures()
-    print(f"Fetched {len(fixtures)} total fixtures.")
+    print(f"Fetched {len(fixtures)} total fixtures for today.")
 
-    processed_count = 0
-    
-    # Filter Logic: Prioritize Top Leagues
-    # 1. First, try to find matches in Priority Leagues
+    # 2. Filter (Prioritize Leagues)
     priority_matches = [m for m in fixtures if m["league"]["id"] in PRIORITY_LEAGUES]
     
-    # 2. If we have priority matches, use them. If not, fallback to the first 5 of any list.
-    target_matches = priority_matches if priority_matches else fixtures
+    # If no priority matches found, take top 5 of *anything* to keep site fresh
+    if priority_matches:
+        target_matches = priority_matches
+        print(f"Found {len(target_matches)} priority matches.")
+    else:
+        target_matches = fixtures
+        print("No priority matches found. Using general fixtures.")
 
-    print(f"Processing {min(5, len(target_matches))} matches...")
-
-    for match in target_matches[:5]:
+    # 3. Publish (Limit to 5 to avoid timeouts/limits)
+    limit = 5
+    processed = 0
+    
+    print(f"Processing up to {limit} matches...")
+    
+    for match in target_matches[:limit]:
         try:
             create_or_update_post(match)
-            processed_count += 1
+            processed += 1
         except Exception as e:
-            print(f"Error processing match: {e}")
+            print(f"Skipped match due to error: {e}")
 
-    print(f"Run complete. Processed {processed_count} posts.")
+    print(f"--- RUN COMPLETE: {processed} posts processed ---")
 
 if __name__ == "__main__":
     main()
