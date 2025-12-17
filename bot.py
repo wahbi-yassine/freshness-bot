@@ -13,141 +13,140 @@ WP_API = WP_BASE + "/wp-json/wp/v2"
 
 WP_USER = os.environ.get("WP_USER", "").strip()
 
-# Prefer an Application Password for WP REST (WP Admin → Users → Profile → Application Passwords)
-WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
+# Use ONE of these (recommended):
+WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()   # preferred
+WP_JWT_TOKEN = os.environ.get("WP_JWT_TOKEN", "").strip()         # alternative
 
-# Fallback (often blocked by hosts; do NOT rely on it)
+# This is NOT reliable for WP REST and will be rejected on most setups:
 WP_PASSWORD = os.environ.get("WP_PASSWORD", "").strip()
 
-# If you use JWT plugin, set this to a valid token string: "eyJ0eXAiOiJKV1QiLCJhbGciOi..."
-WP_JWT_TOKEN = os.environ.get("WP_JWT_TOKEN", "").strip()
-
-# Optional: if your WordPress is behind aggressive WAF, you can set a referer
 WP_REFERER = os.environ.get("WP_REFERER", WP_BASE).strip()
 
 # =====================================================
-# API-FOOTBALL (NEW DASHBOARD)
+# API-FOOTBALL
 # =====================================================
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY", "").strip()
 FOOTBALL_API_URL = "https://v3.football.api-sports.io/fixtures"
 
-# =====================================================
-# HTTP SESSION (reused connections)
-# =====================================================
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "freshness-bot/2.0",
+    "User-Agent": "freshness-bot/2.1",
     "Accept": "application/json",
 })
 
 # =====================================================
-# WORDPRESS AUTH / REQUEST HELPERS
+# AUTH BUILDERS
 # =====================================================
 
-def _basic_auth_header(user: str, pw: str) -> dict:
+def _basic_auth_value(user: str, pw: str) -> str:
     token = base64.b64encode(f"{user}:{pw}".encode("utf-8")).decode("utf-8")
-    return {"Authorization": f"Basic {token}"}
+    return f"Basic {token}"
 
-def wp_headers() -> dict:
-    """
-    Builds headers for WP REST calls.
-    Priority:
-      1) JWT token (Bearer)
-      2) Application Password (Basic)
-      3) Password (Basic - often blocked)
-    """
-    headers = {
+def _headers_with(auth_header_value: str | None) -> dict:
+    h = {
         "Content-Type": "application/json",
         "Referer": WP_REFERER,
     }
+    if auth_header_value:
+        h["Authorization"] = auth_header_value
+    return h
 
+def available_auth_modes():
+    """
+    Returns a list of (name, auth_header_value).
+    Order is important: prefer JWT, then Application Password.
+    """
+    modes = []
     if WP_JWT_TOKEN:
-        headers["Authorization"] = f"Bearer {WP_JWT_TOKEN}"
-        return headers
-
+        modes.append(("JWT", f"Bearer {WP_JWT_TOKEN}"))
     if WP_USER and WP_APP_PASSWORD:
-        headers.update(_basic_auth_header(WP_USER, WP_APP_PASSWORD))
-        return headers
+        modes.append(("APP_PASSWORD", _basic_auth_value(WP_USER, WP_APP_PASSWORD)))
+    return modes
 
-    if WP_USER and WP_PASSWORD:
-        headers.update(_basic_auth_header(WP_USER, WP_PASSWORD))
-        return headers
+def assert_auth_config():
+    modes = available_auth_modes()
 
-    return headers
+    if modes:
+        return
+
+    # If user only provided WP_PASSWORD, fail fast with a clear message.
+    if WP_USER and WP_PASSWORD and not WP_APP_PASSWORD and not WP_JWT_TOKEN:
+        raise RuntimeError(
+            "WP REST is rejecting normal account password (WP_PASSWORD). "
+            "Set WP_APP_PASSWORD (WordPress Application Password) OR WP_JWT_TOKEN."
+        )
+
+    raise RuntimeError(
+        "Missing WordPress auth. Provide WP_JWT_TOKEN OR (WP_USER + WP_APP_PASSWORD)."
+    )
+
+# =====================================================
+# WORDPRESS REQUEST WRAPPER (tries auth modes)
+# =====================================================
 
 def wp_request(method: str, path: str, *, params=None, json=None, timeout=30, retries=2):
-    """
-    Single WP request function with retries + diagnostics.
-    """
     url = urljoin(WP_API + "/", path.lstrip("/"))
-    last_exc = None
 
-    for attempt in range(retries + 1):
-        try:
-            r = SESSION.request(
-                method=method.upper(),
-                url=url,
-                headers=wp_headers(),
-                params=params,
-                json=json,
-                timeout=timeout,
-            )
+    modes = available_auth_modes()
+    if not modes:
+        # Should be prevented by assert_auth_config(), but keep safe.
+        modes = [("NONE", None)]
 
-            # Retry on transient errors
-            if r.status_code in (429, 500, 502, 503, 504) and attempt < retries:
-                time.sleep(1.5 * (attempt + 1))
-                continue
+    last_error = None
 
-            # Helpful output on auth/permission problems
-            if r.status_code in (401, 403):
-                print("\n--- WORDPRESS AUTH ERROR DIAGNOSTICS ---")
-                print("URL:", url)
-                print("Status:", r.status_code)
-                # WP usually returns JSON with code/message
-                print("Body (first 600 chars):", r.text[:600])
-                print("Auth mode:",
-                      "JWT" if WP_JWT_TOKEN else
-                      "APP_PASSWORD" if WP_APP_PASSWORD else
-                      "PASSWORD" if WP_PASSWORD else
-                      "NONE")
-                print("User set:", bool(WP_USER))
-                print("WP_BASE:", WP_BASE)
-                print("WP_API:", WP_API)
-                print("---------------------------------------\n")
+    for mode_name, auth_value in modes:
+        for attempt in range(retries + 1):
+            try:
+                r = SESSION.request(
+                    method=method.upper(),
+                    url=url,
+                    headers=_headers_with(auth_value),
+                    params=params,
+                    json=json,
+                    timeout=timeout,
+                )
 
-            r.raise_for_status()
-            return r
+                # Retry transient issues
+                if r.status_code in (429, 500, 502, 503, 504) and attempt < retries:
+                    time.sleep(1.5 * (attempt + 1))
+                    continue
 
-        except requests.RequestException as e:
-            last_exc = e
-            if attempt < retries:
-                time.sleep(1.5 * (attempt + 1))
-            else:
-                raise
+                if r.status_code in (401, 403):
+                    # Keep diagnostics short but decisive
+                    print("\n--- WORDPRESS AUTH ERROR DIAGNOSTICS ---")
+                    print("URL:", url)
+                    print("Status:", r.status_code)
+                    print("Auth mode attempted:", mode_name)
+                    print("Body (first 400 chars):", r.text[:400])
+                    print("---------------------------------------\n")
 
-    raise last_exc  # should never hit
+                    # If this mode fails, break attempts for this mode and try next mode
+                    last_error = (mode_name, r)
+                    break
+
+                r.raise_for_status()
+                return r
+
+            except requests.RequestException as e:
+                last_error = (mode_name, e)
+                if attempt < retries:
+                    time.sleep(1.5 * (attempt + 1))
+                else:
+                    break
+
+    # If all modes failed, raise the most recent meaningful error
+    if isinstance(last_error, tuple) and len(last_error) == 2:
+        mode, err = last_error
+        if hasattr(err, "raise_for_status"):
+            err.raise_for_status()
+        raise RuntimeError(f"All WP auth modes failed. Last mode: {mode}. Error: {err}")
+
+    raise RuntimeError("All WP auth modes failed for unknown reasons.")
 
 def test_wp_auth():
-    """
-    Strong auth check: /users/me requires authentication.
-    """
     r = wp_request("GET", "/users/me")
     me = r.json()
     print("WP auth OK. User:", me.get("name"), "| ID:", me.get("id"))
-
-def ensure_can_create_posts():
-    """
-    Optional capability check: some users can auth but cannot publish.
-    """
-    # This tries to create a draft then deletes it (trash).
-    payload = {"title": "auth-check", "status": "draft", "content": "auth-check"}
-    r = wp_request("POST", "/posts", json=payload)
-    post_id = r.json().get("id")
-    print("Post create OK. Draft ID:", post_id)
-
-    # Move to trash (cleanup)
-    wp_request("DELETE", f"/posts/{post_id}", params={"force": True})
-    print("Cleanup OK (deleted draft).")
 
 # =====================================================
 # API-FOOTBALL
@@ -175,7 +174,7 @@ def get_fixtures():
     return data.get("response", [])
 
 # =====================================================
-# WORDPRESS POSTS
+# POSTS
 # =====================================================
 
 def get_post_id_by_slug(slug: str):
@@ -210,7 +209,6 @@ def create_or_update_post(match):
         "title": title,
         "slug": slug,
         "content": content,
-        # If your user cannot publish, switch to "draft" until permissions are fixed.
         "status": "publish",
         "comment_status": "closed",
     }
@@ -233,11 +231,11 @@ def create_or_update_post(match):
 def main():
     print("Starting freshness run...")
 
+    # Fail fast unless JWT or Application Password is configured
+    assert_auth_config()
+
     # 1) Verify WordPress authentication FIRST
     test_wp_auth()
-
-    # Optional: also confirm permissions to create posts
-    # ensure_can_create_posts()
 
     # 2) Fetch fixtures
     fixtures = get_fixtures()
