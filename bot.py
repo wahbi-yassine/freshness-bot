@@ -13,21 +13,24 @@ WP_API = WP_BASE + "/wp-json/wp/v2"
 
 WP_USER = os.environ.get("WP_USER", "").strip()
 
-# Use ONE of these (recommended):
-WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()   # preferred
-WP_JWT_TOKEN = os.environ.get("WP_JWT_TOKEN", "").strip()         # alternative
+# Prefer ONE of these:
+WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()   # recommended
+WP_JWT_TOKEN = os.environ.get("WP_JWT_TOKEN", "").strip()         # if using JWT plugin
 
-# This is NOT reliable for WP REST and will be rejected on most setups:
+# Normal password is NOT reliable for WP REST; keep only as legacy fallback
 WP_PASSWORD = os.environ.get("WP_PASSWORD", "").strip()
 
 WP_REFERER = os.environ.get("WP_REFERER", WP_BASE).strip()
 
 # =====================================================
-# API-FOOTBALL
+# API-FOOTBALL (NEW DASHBOARD)
 # =====================================================
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY", "").strip()
 FOOTBALL_API_URL = "https://v3.football.api-sports.io/fixtures"
 
+# =====================================================
+# HTTP SESSION
+# =====================================================
 SESSION = requests.Session()
 SESSION.headers.update({
     "User-Agent": "freshness-bot/2.1",
@@ -35,7 +38,7 @@ SESSION.headers.update({
 })
 
 # =====================================================
-# AUTH BUILDERS
+# AUTH HELPERS
 # =====================================================
 
 def _basic_auth_value(user: str, pw: str) -> str:
@@ -53,44 +56,33 @@ def _headers_with(auth_header_value: str | None) -> dict:
 
 def available_auth_modes():
     """
-    Returns a list of (name, auth_header_value).
-    Order is important: prefer JWT, then Application Password.
+    List of (name, Authorization header value) in priority order.
     """
     modes = []
     if WP_JWT_TOKEN:
         modes.append(("JWT", f"Bearer {WP_JWT_TOKEN}"))
     if WP_USER and WP_APP_PASSWORD:
         modes.append(("APP_PASSWORD", _basic_auth_value(WP_USER, WP_APP_PASSWORD)))
+    # Legacy fallback (usually rejected). Keep only if you insist:
+    if WP_USER and WP_PASSWORD:
+        modes.append(("PASSWORD", _basic_auth_value(WP_USER, WP_PASSWORD)))
     return modes
 
 def assert_auth_config():
     modes = available_auth_modes()
-
-    if modes:
-        return
-
-    # If user only provided WP_PASSWORD, fail fast with a clear message.
-    if WP_USER and WP_PASSWORD and not WP_APP_PASSWORD and not WP_JWT_TOKEN:
+    if not modes:
         raise RuntimeError(
-            "WP REST is rejecting normal account password (WP_PASSWORD). "
-            "Set WP_APP_PASSWORD (WordPress Application Password) OR WP_JWT_TOKEN."
+            "Missing WordPress auth. Set WP_JWT_TOKEN OR (WP_USER + WP_APP_PASSWORD). "
+            "Avoid WP_PASSWORD for REST."
         )
 
-    raise RuntimeError(
-        "Missing WordPress auth. Provide WP_JWT_TOKEN OR (WP_USER + WP_APP_PASSWORD)."
-    )
-
 # =====================================================
-# WORDPRESS REQUEST WRAPPER (tries auth modes)
+# WORDPRESS REQUEST WRAPPER
 # =====================================================
 
 def wp_request(method: str, path: str, *, params=None, json=None, timeout=30, retries=2):
     url = urljoin(WP_API + "/", path.lstrip("/"))
-
     modes = available_auth_modes()
-    if not modes:
-        # Should be prevented by assert_auth_config(), but keep safe.
-        modes = [("NONE", None)]
 
     last_error = None
 
@@ -106,21 +98,17 @@ def wp_request(method: str, path: str, *, params=None, json=None, timeout=30, re
                     timeout=timeout,
                 )
 
-                # Retry transient issues
                 if r.status_code in (429, 500, 502, 503, 504) and attempt < retries:
                     time.sleep(1.5 * (attempt + 1))
                     continue
 
                 if r.status_code in (401, 403):
-                    # Keep diagnostics short but decisive
                     print("\n--- WORDPRESS AUTH ERROR DIAGNOSTICS ---")
                     print("URL:", url)
                     print("Status:", r.status_code)
                     print("Auth mode attempted:", mode_name)
                     print("Body (first 400 chars):", r.text[:400])
                     print("---------------------------------------\n")
-
-                    # If this mode fails, break attempts for this mode and try next mode
                     last_error = (mode_name, r)
                     break
 
@@ -134,14 +122,13 @@ def wp_request(method: str, path: str, *, params=None, json=None, timeout=30, re
                 else:
                     break
 
-    # If all modes failed, raise the most recent meaningful error
     if isinstance(last_error, tuple) and len(last_error) == 2:
         mode, err = last_error
         if hasattr(err, "raise_for_status"):
             err.raise_for_status()
         raise RuntimeError(f"All WP auth modes failed. Last mode: {mode}. Error: {err}")
 
-    raise RuntimeError("All WP auth modes failed for unknown reasons.")
+    raise RuntimeError("All WP auth modes failed.")
 
 def test_wp_auth():
     r = wp_request("GET", "/users/me")
@@ -170,11 +157,10 @@ def get_fixtures():
         raise RuntimeError(f"API-Football auth failed ({r.status_code}): {r.text[:300]}")
 
     r.raise_for_status()
-    data = r.json()
-    return data.get("response", [])
+    return r.json().get("response", [])
 
 # =====================================================
-# POSTS
+# WORDPRESS POSTS
 # =====================================================
 
 def get_post_id_by_slug(slug: str):
@@ -231,17 +217,12 @@ def create_or_update_post(match):
 def main():
     print("Starting freshness run...")
 
-    # Fail fast unless JWT or Application Password is configured
     assert_auth_config()
-
-    # 1) Verify WordPress authentication FIRST
     test_wp_auth()
 
-    # 2) Fetch fixtures
     fixtures = get_fixtures()
     print(f"Fetched {len(fixtures)} fixtures.")
 
-    # 3) Publish (free-tier safe)
     for match in fixtures[:5]:
         created = create_or_update_post(match)
         print("OK:", created.get("slug"), "| status:", created.get("status"))
