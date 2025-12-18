@@ -24,7 +24,6 @@ PRIORITY_LEAGUES = [39, 140, 135, 78, 61, 2, 200]
 VISIBLE_KEYWORDS = ["yacine tv", "yacines tv", "yasin tv", "ياسين تيفي"]
 
 # 2. Keywords for SCHEMA (WebPage node only - Safe to include multiple variants)
-# These are hidden in the code for Google Bot to understand the page topic.
 SCHEMA_KEYWORDS = [
     "yacine tv", "yacines tv", "yasin tv", "ياسين تيفي", 
     "live score", "football match", "koora live", "match today"
@@ -33,9 +32,12 @@ SCHEMA_KEYWORDS = [
 # 3. Your Flagship Page Slug (Where you want to send traffic)
 FLAGSHIP_SLUG = "yacine-tv-online"
 
+# 4. The Slug for your "Matches Today" Hub Page
+HUB_SLUG = "matches-today"
+
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "freshness-bot/7.0",
+    "User-Agent": "freshness-bot/8.0",
     "Accept": "application/json",
 })
 
@@ -61,6 +63,7 @@ def wp_headers():
     }
 
 def wp_request(method, path, **kwargs):
+    # Fix for /pages endpoint usage later
     url = f"{WP_API}/{path.lstrip('/')}"
     for attempt in range(3):
         try:
@@ -80,7 +83,7 @@ def test_wp_auth():
         print(f"Connected as: {data.get('name')}")
 
 # =====================================================
-# 3. CORE FUNCTIONS
+# 3. CORE FUNCTIONS (FETCH & LOOKUP)
 # =====================================================
 def get_fixtures():
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -92,13 +95,17 @@ def get_fixtures():
     r.raise_for_status()
     return r.json().get("response", [])
 
-def get_post_id_by_slug(slug):
-    r = wp_request("GET", "/posts", params={"slug": slug})
+def get_post_id_by_slug(slug, post_type="posts"):
+    # post_type can be 'posts' or 'pages'
+    r = wp_request("GET", f"/{post_type}", params={"slug": slug})
     if r:
-        posts = r.json()
-        return posts[0]["id"] if posts else None
+        data = r.json()
+        return data[0]["id"] if data else None
     return None
 
+# =====================================================
+# 4. MATCH POST CREATION (LEAF PAGES)
+# =====================================================
 def create_or_update_post(match):
     match_id = match["fixture"]["id"]
     slug = f"match-{match_id}"
@@ -124,14 +131,11 @@ def create_or_update_post(match):
     league = match["league"]["name"]
 
     # --- B. SEO KEYWORD SELECTION (Deterministic) ---
-    # Pick 1 keyword for the visible HTML snippet based on match ID
     kw_index = match_id % len(VISIBLE_KEYWORDS)
     target_keyword = VISIBLE_KEYWORDS[kw_index]
     flagship_url = f"{WP_BASE}/{FLAGSHIP_SLUG}/"
 
     # --- C. SCHEMA: THE KNOWLEDGE GRAPH (@graph) ---
-    # This separates the 'WebPage' (where keywords belong) from the 'SportsEvent' (where they don't)
-    
     # Node 1: WebPage
     webpage_node = {
         "@type": "WebPage",
@@ -139,14 +143,14 @@ def create_or_update_post(match):
         "url": post_url,
         "name": f"{home} vs {away} - Live Score & Updates",
         "inLanguage": "en-US",
-        "keywords": SCHEMA_KEYWORDS # Safe to list all variants here
+        "keywords": SCHEMA_KEYWORDS
     }
 
-    # Node 2: SportsEvent (Clean Entity)
+    # Node 2: SportsEvent
     event_node = {
         "@type": "SportsEvent",
         "@id": f"{post_url}#event",
-        "mainEntityOfPage": {"@id": f"{post_url}#webpage"}, # Link event to page
+        "mainEntityOfPage": {"@id": f"{post_url}#webpage"},
         "name": f"{home} vs {away}",
         "startDate": date_iso,
         "eventStatus": "https://schema.org/EventScheduled",
@@ -157,13 +161,11 @@ def create_or_update_post(match):
         "location": {"@type": "Place", "name": venue}
     }
 
-    # Combine into graph
     graph_data = {
         "@context": "https://schema.org",
         "@graph": [webpage_node, event_node]
     }
     
-    # Safe dump to JSON string
     schema_str = json.dumps(graph_data)
     schema_block = f'<script type="application/ld+json">{schema_str}</script>'
 
@@ -236,19 +238,100 @@ def create_or_update_post(match):
     }
 
     # SEND
-    existing_id = get_post_id_by_slug(slug)
+    existing_id = get_post_id_by_slug(slug, "posts")
     if existing_id:
-        print(f"Updating: {home} vs {away}")
+        print(f"Updating Match: {home} vs {away}")
         wp_request("POST", f"/posts/{existing_id}", json=payload)
     else:
-        print(f"Creating: {home} vs {away}")
+        print(f"Creating Match: {home} vs {away}")
         wp_request("POST", "/posts", json=payload)
 
 # =====================================================
-# 4. RUNNER
+# 5. HUB PAGE UPDATE (TRUNK PAGE)
+# =====================================================
+def update_hub_page(matches):
+    """Updates a single 'Matches Today' page with a schedule table."""
+    
+    # 1. Build Table HTML
+    list_html = """
+    <h2 class="wp-block-heading has-text-align-center">📅 Today's Match Schedule</h2>
+    <figure class="wp-block-table is-style-stripes has-small-font-size"><table>
+    <thead><tr>
+        <th>Time</th>
+        <th>Match</th>
+        <th>League</th>
+        <th>Status</th>
+    </tr></thead>
+    <tbody>
+    """
+    
+    count = 0
+    for match in matches:
+        match_id = match["fixture"]["id"]
+        slug = f"match-{match_id}"
+        post_link = f"{WP_BASE}/{slug}/"
+        
+        home = match["teams"]["home"]["name"]
+        away = match["teams"]["away"]["name"]
+        league = match["league"]["name"]
+        status_short = match["fixture"]["status"]["short"]
+        
+        date_iso = match["fixture"]["date"]
+        try:
+            dt_obj = datetime.fromisoformat(date_iso.replace("Z", "+00:00"))
+            time_str = dt_obj.strftime("%H:%M")
+        except:
+            time_str = "TBD"
+
+        # Table Row
+        list_html += f"""
+        <tr>
+            <td><strong>{time_str}</strong></td>
+            <td><a href="{post_link}">{home} vs {away}</a></td>
+            <td>{league}</td>
+            <td>{status_short}</td>
+        </tr>
+        """
+        count += 1
+    
+    list_html += "</tbody></table></figure>"
+
+    # 2. Add Hub SEO Content
+    seo_text = f"""
+    <p>Watch all the top football matches for today. 
+    We cover the Premier League, La Liga, and Botola Pro. 
+    Follow <strong>Yacine TV</strong> live scores and updates for every game listed above. 
+    Click any match in the table to see the full legal viewing guide and minute-by-minute updates.</p>
+    """
+    
+    full_content = list_html + seo_text
+
+    if count == 0:
+        print("No matches to list on Hub.")
+        return
+
+    # 3. Update the Page
+    payload = {
+        "title": f"Matches Today ({datetime.now().strftime('%d %b')}) - Live Schedule",
+        "slug": HUB_SLUG,
+        "status": "publish",
+        "content": full_content
+    }
+
+    # Check for PAGE (not post)
+    existing_id = get_post_id_by_slug(HUB_SLUG, "pages")
+    if existing_id:
+        print(f"Updating Hub Page: {HUB_SLUG}")
+        wp_request("POST", f"/pages/{existing_id}", json=payload)
+    else:
+        print(f"Creating Hub Page: {HUB_SLUG}")
+        wp_request("POST", "/pages", json=payload)
+
+# =====================================================
+# 6. MAIN RUNNER
 # =====================================================
 def main():
-    print("--- STARTING BOT (FINAL LOGIC-FIRST) ---")
+    print("--- STARTING BOT (FINAL PHASE) ---")
     print_env_status()
     assert_auth_config()
     test_wp_auth()
@@ -256,19 +339,24 @@ def main():
     all_fixtures = get_fixtures()
     
     # Filter
-    matches = [m for m in all_fixtures if m["league"]["id"] in PRIORITY_LEAGUES]
+    priority_matches = [m for m in all_fixtures if m["league"]["id"] in PRIORITY_LEAGUES]
     
-    # Fallback if no priority matches
-    if not matches:
-        print("No priority matches found. Using general fixtures.")
-        matches = all_fixtures
+    # 1. Update Matches
+    if not priority_matches:
+        print("No priority matches found. Updating Hub only.")
+    else:
+        print(f"Updating {len(priority_matches)} match pages...")
+        for match in priority_matches:
+            try:
+                create_or_update_post(match)
+            except Exception as e:
+                print(f"Error on match {match['fixture']['id']}: {e}")
 
-    print(f"Processing {min(5, len(matches))} matches...")
-    for match in matches[:5]:
-        try:
-            create_or_update_post(match)
-        except Exception as e:
-            print(f"Error: {e}")
+    # 2. Update Hub
+    if priority_matches:
+        update_hub_page(priority_matches)
+
+    print("--- RUN COMPLETE ---")
 
 if __name__ == "__main__":
     main()
