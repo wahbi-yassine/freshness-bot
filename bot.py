@@ -20,14 +20,22 @@ FOOTBALL_API_URL = "https://v3.football.api-sports.io/fixtures"
 PRIORITY_LEAGUES = [39, 140, 135, 78, 61, 2, 200]
 
 # SEO CONFIGURATION
-# Keywords to rotate deterministically (1 per post)
-SEO_KEYWORDS = ["yacine tv", "yacines tv", "yasin tv", "ياسين تيفي"]
-# The slug of your main page (e.g. yoursite.com/yacine-tv-online/)
+# 1. Keywords for VISIBLE text rotation (Pick 1 per post based on Match ID)
+VISIBLE_KEYWORDS = ["yacine tv", "yacines tv", "yasin tv", "ياسين تيفي"]
+
+# 2. Keywords for SCHEMA (WebPage node only - Safe to include multiple variants)
+# These are hidden in the code for Google Bot to understand the page topic.
+SCHEMA_KEYWORDS = [
+    "yacine tv", "yacines tv", "yasin tv", "ياسين تيفي", 
+    "live score", "football match", "koora live", "match today"
+]
+
+# 3. Your Flagship Page Slug (Where you want to send traffic)
 FLAGSHIP_SLUG = "yacine-tv-online"
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "freshness-bot/6.0",
+    "User-Agent": "freshness-bot/7.0",
     "Accept": "application/json",
 })
 
@@ -94,6 +102,7 @@ def get_post_id_by_slug(slug):
 def create_or_update_post(match):
     match_id = match["fixture"]["id"]
     slug = f"match-{match_id}"
+    post_url = f"{WP_BASE}/{slug}/" # Canonical URL for Schema
 
     # --- A. DATA EXTRACTION ---
     home = match["teams"]["home"]["name"]
@@ -114,16 +123,30 @@ def create_or_update_post(match):
     status = match["fixture"]["status"]["long"]
     league = match["league"]["name"]
 
-    # --- B. SEO KEYWORD SELECTION ---
-    # Pick 1 keyword based on match ID (Deterministic)
-    kw_index = match_id % len(SEO_KEYWORDS)
-    target_keyword = SEO_KEYWORDS[kw_index]
+    # --- B. SEO KEYWORD SELECTION (Deterministic) ---
+    # Pick 1 keyword for the visible HTML snippet based on match ID
+    kw_index = match_id % len(VISIBLE_KEYWORDS)
+    target_keyword = VISIBLE_KEYWORDS[kw_index]
     flagship_url = f"{WP_BASE}/{FLAGSHIP_SLUG}/"
 
-    # --- C. SCHEMA (Pure & Safe) ---
-    schema_obj = {
-        "@context": "https://schema.org",
+    # --- C. SCHEMA: THE KNOWLEDGE GRAPH (@graph) ---
+    # This separates the 'WebPage' (where keywords belong) from the 'SportsEvent' (where they don't)
+    
+    # Node 1: WebPage
+    webpage_node = {
+        "@type": "WebPage",
+        "@id": f"{post_url}#webpage",
+        "url": post_url,
+        "name": f"{home} vs {away} - Live Score & Updates",
+        "inLanguage": "en-US",
+        "keywords": SCHEMA_KEYWORDS # Safe to list all variants here
+    }
+
+    # Node 2: SportsEvent (Clean Entity)
+    event_node = {
         "@type": "SportsEvent",
+        "@id": f"{post_url}#event",
+        "mainEntityOfPage": {"@id": f"{post_url}#webpage"}, # Link event to page
         "name": f"{home} vs {away}",
         "startDate": date_iso,
         "eventStatus": "https://schema.org/EventScheduled",
@@ -133,7 +156,15 @@ def create_or_update_post(match):
         ],
         "location": {"@type": "Place", "name": venue}
     }
-    schema_str = json.dumps(schema_obj)
+
+    # Combine into graph
+    graph_data = {
+        "@context": "https://schema.org",
+        "@graph": [webpage_node, event_node]
+    }
+    
+    # Safe dump to JSON string
+    schema_str = json.dumps(graph_data)
     schema_block = f'<script type="application/ld+json">{schema_str}</script>'
 
     # --- D. VISUAL CARD (Premium Design) ---
@@ -180,19 +211,20 @@ def create_or_update_post(match):
         </div>
     """
 
-    # --- E. SEO SNIPPET (Legitimate Keyword Linking) ---
+    # --- E. SEO SNIPPET (Visible - "How to Watch") ---
     seo_snippet = f"""
     <div style="height:30px" aria-hidden="true" class="wp-block-spacer"></div>
     <div class="wp-block-group has-white-background-color has-background" style="border:1px solid #e0e0e0;border-radius:8px;padding-top:20px;padding-right:20px;padding-bottom:20px;padding-left:20px">
         <h4 class="wp-block-heading" style="margin-top:0;">📺 Official Viewing Guide</h4>
         <p class="has-small-font-size" style="color:#555;">
-            Guide: <strong>{target_keyword}</strong> — How to watch matches legally in Morocco. 
-            Check our complete guide on <a href="{flagship_url}" style="color:#d63638;text-decoration:underline;font-weight:bold;">how to watch legally</a>.
+            Searching for <strong>{target_keyword}</strong> to watch the match? 
+            We support legal streaming options in Morocco. 
+            View our full guide on <a href="{flagship_url}" style="color:#d63638;text-decoration:underline;font-weight:bold;">how to watch officially</a>.
         </p>
         </div>
     """
 
-    # Combine
+    # Combine All
     full_content = schema_block + visual_block + seo_snippet
 
     payload = {
@@ -216,7 +248,7 @@ def create_or_update_post(match):
 # 4. RUNNER
 # =====================================================
 def main():
-    print("--- STARTING BOT (FINAL PRO) ---")
+    print("--- STARTING BOT (FINAL LOGIC-FIRST) ---")
     print_env_status()
     assert_auth_config()
     test_wp_auth()
@@ -226,7 +258,7 @@ def main():
     # Filter
     matches = [m for m in all_fixtures if m["league"]["id"] in PRIORITY_LEAGUES]
     
-    # Fallback if no priority matches (so site stays fresh)
+    # Fallback if no priority matches
     if not matches:
         print("No priority matches found. Using general fixtures.")
         matches = all_fixtures
