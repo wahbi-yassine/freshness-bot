@@ -5,33 +5,31 @@ import json
 from datetime import datetime, timezone, timedelta
 
 # =====================================================
-# 1. CONFIGURATION & CLEANUP
+# 1. الإعدادات وتصحيح المدخلات (Environment & Cleanup)
 # =====================================================
-# Categorized Leagues
 ARAB_LEAGUES = [200, 307, 233, 531, 12, 17, 202, 141, 143] 
 EUROPE_LEAGUES = [39, 140, 135, 78, 61, 2, 3] 
 NATIONS_LEAGUES = [1, 4, 9, 10, 20, 21, 42]
 
-# Environment Variables with .strip() to prevent "Invalid Header" errors
+# تنظيف المتغيرات لضمان عدم وجود أسطر زائدة تسبب خطأ في الـ Header
 WP_URL = os.environ.get("WP_URL", "").strip().rstrip("/")
 WP_USER = os.environ.get("WP_USER", "").strip()
 WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY", "").strip()
 
 def get_wp_headers():
-    # Ensure no spaces in App Password
     clean_pwd = WP_APP_PASSWORD.replace(" ", "")
     auth_str = f"{WP_USER}:{clean_pwd}"
     token = base64.b64encode(auth_str.encode()).decode()
     return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
 
 # =====================================================
-# 2. HARDENED HTML TEMPLATE
+# 2. قالب العرض الاحترافي (Hardened UI Template)
 # =====================================================
 HTML_TEMPLATE = r"""<div id="ys-main-app" class="ys-widget-ui" dir="rtl">
     <div class="ys-tabs">
         <a href="/matches-yesterday/" class="ys-tab-btn __ACT_YESTERDAY__">الأمس</a>
-        <a href="/matches-today/" class="ys-tab-btn active __ACT_TODAY__">اليوم</a>
+        <a href="/matches-today/" class="ys-tab-btn __ACT_TODAY__">مباريات اليوم</a>
         <a href="/matches-tomorrow/" class="ys-tab-btn __ACT_TOMORROW__">الغد</a>
     </div>
 
@@ -40,27 +38,45 @@ HTML_TEMPLATE = r"""<div id="ys-main-app" class="ys-widget-ui" dir="rtl">
     <div id="ys-view">
         <div class="ys-loader">جاري تحديث النتائج...</div>
     </div>
+    <div id="ys-refresh-timer" style="font-size:9px; color:#ccc; text-align:center; margin-top:10px;">سيتم التحديث تلقائياً خلال دقائق...</div>
 </div>
 
 <script>
 (function() {
+    let tries = 0;
+    const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 دقائق
+
     function start() {
         const payloadDiv = document.getElementById('ys-payload');
         const viewDiv = document.getElementById('ys-view');
-        if (!payloadDiv || !viewDiv) return;
+        
+        // نظام المحاولات المتكررة لضمان وجود الـ DOM (Retry Mechanism)
+        if (!payloadDiv || !viewDiv) {
+            if (tries < 20) {
+                tries++;
+                setTimeout(start, 250);
+            } else {
+                console.error("YS: Elements not found.");
+            }
+            return;
+        }
 
         try {
-            // REGEX FIX: Remove any HTML tags WordPress might have added inside the div
-            let rawBase64 = payloadDiv.innerHTML.replace(/<[^>]*>/g, "").trim();
-            
-            // UTF-8 DECODING: Handles Arabic characters correctly
+            // استخدام textContent والتنظيف الصارم لضمان فك تشفير Base64 بنجاح
+            let rawBase64 = (payloadDiv.textContent || "")
+                .replace(/&nbsp;/g, "")
+                .replace(/\s+/g, "")
+                .replace(/[^A-Za-z0-9+/=]/g, "")
+                .trim();
+
+            if (!rawBase64 || rawBase64.length < 10) {
+                throw new Error("Payload Empty");
+            }
+
             const binaryString = atob(rawBase64);
             const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-            const decodedStr = new TextDecoder().decode(bytes);
-            const data = JSON.parse(decodedStr);
+            for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
+            const data = JSON.parse(new TextDecoder().decode(bytes));
             
             if (!data || data.length === 0) {
                 viewDiv.innerHTML = '<div class="ys-no-data">لا توجد مباريات هامة متوفرة حالياً</div>';
@@ -87,19 +103,18 @@ HTML_TEMPLATE = r"""<div id="ys-main-app" class="ys-widget-ui" dir="rtl">
                 });
             });
             viewDiv.innerHTML = html;
+
+            // ميزة التحديث التلقائي (Auto-Refresh)
+            setTimeout(() => { location.reload(); }, REFRESH_INTERVAL);
+
         } catch (e) {
-            console.error("Decoding Error:", e);
-            viewDiv.innerHTML = '<div class="ys-no-data">❌ خطأ في عرض البيانات.</div>';
+            console.error("YS Error:", e);
+            viewDiv.innerHTML = '<div class="ys-no-data">❌ عذراً، حدث خطأ أثناء عرض البيانات.</div>';
         }
     }
 
-    // Run when DOM is ready or if already loaded
-    if (document.readyState === "complete" || document.readyState === "interactive") {
-        start();
-    } else {
-        window.addEventListener('DOMContentLoaded', start);
-        window.addEventListener('load', start);
-    }
+    if (document.readyState === "complete" || document.readyState === "interactive") start();
+    else window.addEventListener('load', start);
 })();
 </script>
 
@@ -128,11 +143,11 @@ HTML_TEMPLATE = r"""<div id="ys-main-app" class="ys-widget-ui" dir="rtl">
 """
 
 # =====================================================
-# 3. CORE PROCESSING LOGIC
+# 3. منطق الجلب والمعالجة (API & Processing)
 # =====================================================
 
 def fetch_data(date_str):
-    print(f"📡 Fetching data for: {date_str}")
+    print(f"📡 Fetching: {date_str}")
     headers = {"x-apisports-key": FOOTBALL_API_KEY, "Accept": "application/json"}
     try:
         r = requests.get(
@@ -165,9 +180,11 @@ def organize_matches(raw_fixtures):
             sections[target]["leagues"][lname] = {"name": lname, "logo": f["league"]["logo"], "matches": []}
             
         status = "scheduled"
-        if f["fixture"]["status"]["short"] in ["FT", "AET", "PEN"]: status = "finished"
-        elif f["fixture"]["status"]["short"] in ["1H", "HT", "2H", "LIVE", "BT"]: status = "live"
+        short_status = f["fixture"]["status"]["short"]
+        if short_status in ["FT", "AET", "PEN"]: status = "finished"
+        elif short_status in ["1H", "HT", "2H", "LIVE", "BT"]: status = "live"
         
+        # تحويل الوقت مع مراعاة توقيت الدار البيضاء
         dt = datetime.fromisoformat(f["fixture"]["date"].replace('Z', '+00:00'))
         time_str = dt.astimezone(timezone(timedelta(hours=1))).strftime("%H:%M")
         
@@ -183,32 +200,25 @@ def organize_matches(raw_fixtures):
 def update_wp(day_type, data):
     slugs = {"yesterday": "matches-yesterday", "today": "matches-today", "tomorrow": "matches-tomorrow"}
     
-    # Python-side Base64 encoding
+    # تحويل البيانات لـ Base64 لضمان عبورها من فلاتر ووردبريس
     json_bytes = json.dumps(data, ensure_ascii=False).encode('utf-8')
     b64_data = base64.b64encode(json_bytes).decode('utf-8')
     
     content = HTML_TEMPLATE.replace("__B64_DATA__", b64_data)
-    # Handle Tab Highlighting
     for d in ["yesterday", "today", "tomorrow"]:
         active_class = "active" if day_type == d else ""
         content = content.replace(f"__ACT_{d.upper()}__", active_class)
         
     headers = get_wp_headers()
-    # Find Page ID
     r = requests.get(f"{WP_URL}/wp-json/wp/v2/pages", params={"slug": slugs[day_type]}, headers=headers)
     
     if r.status_code == 200 and r.json():
         pid = r.json()[0]["id"]
-        # Update Page
-        res = requests.post(f"{WP_URL}/wp-json/wp/v2/pages/{pid}", headers=headers, json={"content": content})
-        if res.status_code == 200:
-            print(f"✅ Success: Updated {slugs[day_type]}")
-        else:
-            print(f"❌ WP Update Error ({res.status_code}): {res.text}")
-    else:
-        print(f"❌ Page not found: {slugs[day_type]}")
+        requests.post(f"{WP_URL}/wp-json/wp/v2/pages/{pid}", headers=headers, json={"content": content})
+        print(f"✅ Updated: {slugs[day_type]}")
 
 if __name__ == "__main__":
+    # تشغيل الدورة لليوم والأمس والغد
     now = datetime.now(timezone(timedelta(hours=1)))
     for d_name, offset in {"yesterday": -1, "today": 0, "tomorrow": 1}.items():
         date_str = (now + timedelta(days=offset)).strftime("%Y-%m-%d")
