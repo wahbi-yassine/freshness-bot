@@ -1,43 +1,26 @@
 import os
 import requests
 import base64
-import time
 import json
+import time
 from datetime import datetime, timezone, timedelta
 
 # =====================================================
-# 1. الإعدادات (CONFIGURATION)
+# 1. الإعدادات الأساسية (CONFIGURATION)
 # =====================================================
 WP_BASE = os.environ["WP_URL"].rstrip("/")
-WP_API = WP_BASE + "/wp-json/wp/v2"
+WP_API = f"{WP_BASE}/wp-json/wp/v2"
 WP_USER = os.environ.get("WP_USER", "").strip()
 WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY", "").strip()
 FOOTBALL_API_URL = "https://v3.football.api-sports.io/fixtures"
 
-# تصفية البطولات (IDs)
-PRIORITY_LEAGUES = [39, 140, 135, 78, 61, 2, 200, 1, 9, 3, 4]
+# البطولات المفضلة (يمكنك إضافة المزيد من IDs هنا)
+PRIORITY_LEAGUES = [39, 140, 135, 78, 61, 2, 200, 1, 9, 3, 4, 480, 529]
 
 SESSION = requests.Session()
-SESSION.headers.update({
-    "User-Agent": "freshness-bot/11.0",
-    "Accept": "application/json",
-})
 
-# =====================================================
-# 2. دوال المصادقة (AUTH HELPERS)
-# =====================================================
-def print_env_status():
-    print("ENV CHECK:")
-    print(" - WP_URL:", bool(WP_BASE))
-    print(" - WP_USER:", bool(WP_USER))
-    print(" - FOOTBALL_API_KEY:", bool(FOOTBALL_API_KEY))
-
-def assert_auth_config():
-    if not (WP_USER and WP_APP_PASSWORD):
-        raise RuntimeError("Missing WordPress auth secrets.")
-
-def wp_headers():
+def get_wp_headers():
     clean_pw = WP_APP_PASSWORD.replace(" ", "")
     token = base64.b64encode(f"{WP_USER}:{clean_pw}".encode("utf-8")).decode("utf-8")
     return {
@@ -45,364 +28,187 @@ def wp_headers():
         "Content-Type": "application/json",
     }
 
-def wp_request(method, path, **kwargs):
-    url = f"{WP_API}/{path.lstrip('/')}"
-    for attempt in range(3):
-        try:
-            r = SESSION.request(method, url, headers=wp_headers(), **kwargs)
-            if r.status_code in (401, 403):
-                print(f"Auth Error ({r.status_code}): Check User Role is Administrator!")
-            r.raise_for_status()
-            return r
-        except Exception as e:
-            if attempt == 2: print(f"Request Failed: {e}")
-            time.sleep(2)
-
-def test_wp_auth():
-    r = wp_request("GET", "/users/me")
-    if r:
-        data = r.json()
-        print(f"Connected as: {data.get('name')}")
-
 # =====================================================
-# 3. جلب البيانات (DATA FETCHING)
+# 2. قالب العرض (HTML + CSS + JS)
 # =====================================================
-def get_fixtures(date_str):
-    print(f"Fetching fixtures for: {date_str}...")
-    # نجلب البيانات باللغة العربية
-    params = {
-        "date": date_str,
-        "timezone": "Africa/Casablanca",
-        "lang": "ar" 
-    }
-    r = requests.get(
-        FOOTBALL_API_URL, 
-        headers={"x-apisports-key": FOOTBALL_API_KEY}, 
-        params=params
-    )
-    r.raise_for_status()
-    data = r.json().get("response", [])
-    
-    # تصفية البطولات المهمة فقط (اختياري)
-    filtered = [m for m in data if m["league"]["id"] in PRIORITY_LEAGUES]
-    
-    # إذا كانت القائمة فارغة (لا توجد مباريات مهمة)، نأخذ أهم 30 مباراة بشكل عام
-    if not filtered and data:
-        return data[:30]
-        
-    return filtered
-
-def get_post_id_by_slug(slug, post_type="posts"):
-    r = wp_request("GET", f"/{post_type}", params={"slug": slug})
-    if r:
-        data = r.json()
-        return data[0]["id"] if data else None
-    return None
-
-# =====================================================
-# 4. قالب الـ HTML (RAW TEMPLATE)
-# =====================================================
-# نستخدم raw string (r) لتجنب مشاكل الأقواس في بايثون
-HTML_TEMPLATE_RAW = r"""<div id="ys-matches-app" class="ys-wrapper" dir="rtl">
-  <div class="ys-controls">
-    <div class="ys-tabs">
-      <a href="/matches-yesterday/" class="ys-tab __ACT_YESTERDAY__" data-day="yesterday">الأمس</a>
-      <a href="/matches-today/" class="ys-tab __ACT_TODAY__" data-day="today">اليوم</a>
-      <a href="/matches-tomorrow/" class="ys-tab __ACT_TOMORROW__" data-day="tomorrow">الغد</a>
+# ملاحظة: نستخدم Base64 لنقل البيانات لضمان عدم تلفها داخل ووردبريس
+HTML_TEMPLATE = r"""<div id="ys-app" class="ys-container" dir="rtl">
+    <div class="ys-nav">
+        <a href="/matches-yesterday/" class="ys-btn __ACT_YESTERDAY__">الأمس</a>
+        <a href="/matches-today/" class="ys-btn __ACT_TODAY__">اليوم</a>
+        <a href="/matches-tomorrow/" class="ys-btn __ACT_TOMORROW__">الغد</a>
     </div>
-    
-    <div class="ys-filters">
-      <div class="ys-search-group">
-        <input type="text" id="ysSearch" placeholder="ابحث عن فريق..." aria-label="بحث عن مباراة">
-        <svg class="ys-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-      </div>
-      <div class="ys-select-group">
-        <select id="ysLeagueSelect" aria-label="اختر البطولة"><option value="all">كل البطولات</option></select>
-      </div>
-      <div class="ys-timezone-group">
-        <select id="ysTimezone" aria-label="توقيت العرض">
-          <option value="Africa/Casablanca">الدار البيضاء (GMT+1)</option>
-          <option value="Africa/Cairo">القاهرة (GMT+2)</option>
-          <option value="Asia/Riyadh">مكة المكرمة (GMT+3)</option>
-          <option value="local">توقيت جهازي</option>
-        </select>
-      </div>
+
+    <div class="ys-search-box">
+        <input type="text" id="ys-input" placeholder="بحث عن فريق أو دوري...">
     </div>
-  </div>
 
-  <div id="ys-matches-container" class="ys-matches-list">
-    <div class="ys-loading">جاري تحميل البيانات...</div>
-  </div>
-
-  <div class="ys-footer">
-    <p>⚠️ <strong>تنويه:</strong> التوقيت الافتراضي هو توقيت المغرب.</p>
-  </div>
+    <div id="ys-list" class="ys-matches-list">
+        <div class="ys-wait">جاري معالجة البيانات...</div>
+    </div>
 </div>
 
-<script type="application/json" id="ys-matches-data">
-__JSON_DATA__
+<script>
+(function() {
+    const DATA_B64 = "__B64_PAYLOAD__";
+    let allLeagues = [];
+
+    try {
+        const decoded = atob(DATA_B64);
+        const bytes = new Uint8Array(decoded.length);
+        for (let i = 0; i < decoded.length; i++) bytes[i] = decoded.charCodeAt(i);
+        allLeagues = JSON.parse(new TextDecoder().decode(bytes));
+    } catch (err) { console.error("Data Fail:", err); }
+
+    const listDiv = document.getElementById('ys-list');
+    const input = document.getElementById('ys-input');
+
+    function draw(filter = "") {
+        let html = '';
+        allLeagues.forEach(lg => {
+            const matches = lg.matches.filter(m => 
+                m.home.includes(filter) || m.away.includes(filter) || lg.league.includes(filter)
+            );
+            
+            if (matches.length > 0) {
+                html += `<div class="ys-lg-card">
+                    <div class="ys-lg-head"><img src="${lg.logo}" width="20"> ${lg.league}</div>
+                    ${matches.map(m => `
+                        <div class="ys-row">
+                            <div class="ys-tm side-h"><span>${m.home}</span><img src="${m.hLogo}" width="25"></div>
+                            <div class="ys-mid">
+                                <div class="ys-sc ${m.stat}">${m.stat==='scheduled' ? m.time : (m.score || '0-0')}</div>
+                                <div class="ys-st ${m.stat}">${m.stat==='live'?'مباشر':(m.stat==='finished'?'انتهت':'قريباً')}</div>
+                            </div>
+                            <div class="ys-tm side-a"><img src="${m.aLogo}" width="25"><span>${m.away}</span></div>
+                        </div>
+                    `).join('')}
+                </div>`;
+            }
+        });
+        listDiv.innerHTML = html || '<div class="ys-wait">لا توجد مباريات مطابقة</div>';
+    }
+
+    input.addEventListener('input', e => draw(e.target.value));
+    draw();
+})();
 </script>
 
 <style>
-  :root { --ys-primary: #e60023; --ys-dark: #1a1a1a; --ys-gray: #f4f6f8; --ys-text: #333; --ys-border: #e1e4e8; --ys-radius: 12px; --ys-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; }
-  .ys-wrapper { font-family: var(--ys-font); max-width: 100%; margin: 0 auto; color: var(--ys-text); }
-  .ys-wrapper * { box-sizing: border-box; }
-  .ys-tabs { display: flex; justify-content: center; gap: 1rem; margin-bottom: 1.5rem; background: #fff; padding: 0.5rem; border-radius: var(--ys-radius); box-shadow: 0 2px 8px rgba(0,0,0,0.05); }
-  .ys-tab { text-decoration: none; padding: 0.5rem 1.5rem; border-radius: 8px; color: #666; font-weight: 600; }
-  .ys-tab.active, .ys-tab:hover { background: var(--ys-primary); color: #fff; }
-  .ys-filters { display: flex; flex-wrap: wrap; gap: 1rem; margin-bottom: 2rem; }
-  .ys-search-group, .ys-select-group, .ys-timezone-group { flex: 1; min-width: 200px; position: relative; }
-  .ys-search-group input, .ys-filters select { width: 100%; padding: 0.75rem 1rem; border: 1px solid var(--ys-border); border-radius: 8px; background: #fff; }
-  .ys-wrapper[dir="rtl"] .ys-search-group input { padding-left: 1rem; padding-right: 2.5rem; }
-  .ys-icon { position: absolute; top: 50%; transform: translateY(-50%); width: 1.2rem; height: 1.2rem; color: #999; right: 0.8rem; }
-  .ys-league-block { background: #fff; border-radius: var(--ys-radius); margin-bottom: 1.5rem; border: 1px solid var(--ys-border); }
-  .ys-league-header { background: #f8f9fa; padding: 0.8rem 1rem; display: flex; align-items: center; gap: 0.8rem; border-bottom: 1px solid var(--ys-border); }
-  .ys-league-icon { width: 24px; height: 24px; object-fit: contain; }
-  .ys-league-name { font-weight: 700; }
-  .ys-match-row { display: flex; align-items: center; justify-content: space-between; padding: 1rem; border-bottom: 1px solid #eee; }
-  .ys-team { flex: 1; display: flex; align-items: center; gap: 0.8rem; font-weight: 600; }
-  .ys-team.home { justify-content: flex-end; }
-  .ys-team.away { justify-content: flex-start; }
-  .ys-match-center { flex: 0 0 100px; text-align: center; }
-  .ys-score { font-size: 1.2rem; font-weight: 800; }
-  .ys-time { font-size: 0.9rem; color: #666; direction: ltr; }
-  .ys-status { font-size: 0.75rem; padding: 2px 8px; border-radius: 10px; margin-top: 4px; display: inline-block; }
-  .ys-status.live { background: #ffebeb; color: #d90000; animation: pulse 2s infinite; }
-  .ys-status.finished { background: #eee; }
-  .ys-status.scheduled { background: #e6f4ea; color: #1a7f37; }
-  @media (max-width: 560px) { .ys-match-row { font-size: 0.9rem; } .ys-team-logo { width: 24px; height: 24px; } }
+.ys-container { background: #fcfcfc; border: 1px solid #eee; border-radius: 12px; padding: 15px; font-family: system-ui; color: #333; max-width: 850px; margin: auto; }
+.ys-nav { display: flex; gap: 8px; margin-bottom: 20px; }
+.ys-btn { flex: 1; text-align: center; padding: 12px; background: #fff; border: 1px solid #ddd; border-radius: 8px; text-decoration: none; color: #555; font-weight: bold; font-size: 14px; }
+.ys-btn.active { background: #e60023; color: #fff; border-color: #e60023; box-shadow: 0 4px 10px rgba(230,0,35,0.2); }
+.ys-search-box input { width: 100%; padding: 14px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 15px; box-sizing: border-box; outline: none; transition: 0.3s; }
+.ys-search-box input:focus { border-color: #e60023; box-shadow: 0 0 5px rgba(230,0,35,0.1); }
+.ys-lg-card { background: #fff; border: 1px solid #eee; border-radius: 10px; margin-bottom: 15px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
+.ys-lg-head { background: #f8f8f8; padding: 10px 15px; font-size: 13px; font-weight: 800; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #eee; color: #444; }
+.ys-row { display: flex; align-items: center; padding: 15px 10px; border-bottom: 1px solid #f9f9f9; }
+.ys-tm { flex: 1; display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; }
+.side-h { justify-content: flex-end; }
+.side-a { justify-content: flex-start; }
+.ys-mid { width: 90px; text-align: center; }
+.ys-sc { font-size: 17px; font-weight: 900; color: #000; letter-spacing: -1px; }
+.ys-sc.scheduled { font-size: 14px; color: #777; font-weight: normal; }
+.ys-st { font-size: 10px; padding: 2px 8px; border-radius: 20px; display: inline-block; margin-top: 4px; font-weight: bold; }
+.ys-st.live { background: #ff0000; color: #fff; animation: ys-blink 1s infinite; }
+.ys-st.finished { background: #f0f0f0; color: #888; }
+.ys-st.scheduled { background: #e3f2fd; color: #1976d2; }
+.ys-wait { padding: 40px; text-align: center; color: #999; }
+@keyframes ys-blink { 50% { opacity: 0.4; } }
+@media (max-width: 500px) { .ys-tm span { font-size: 11px; } .ys-mid { width: 70px; } .ys-sc { font-size: 14px; } }
 </style>
-
-<script>
-document.addEventListener('DOMContentLoaded', function () {
-    const DEFAULT_TIMEZONE = "Africa/Casablanca";
-    let allMatches = [];
-    
-    // محاولة قراءة البيانات بأمان
-    const scriptTag = document.getElementById('ys-matches-data');
-    if (scriptTag && scriptTag.textContent.trim().length > 0) {
-        try {
-            allMatches = JSON.parse(scriptTag.textContent);
-        } catch (e) {
-            console.error("خطأ في قراءة البيانات:", e);
-        }
-    }
-
-    const container = document.getElementById('ys-matches-container');
-    const searchInput = document.getElementById('ysSearch');
-    const leagueSelect = document.getElementById('ysLeagueSelect');
-    const timezoneSelect = document.getElementById('ysTimezone');
-
-    function formatTime(isoString, timeZone) {
-        if (!isoString) return '';
-        try {
-            return new Intl.DateTimeFormat('ar-MA', {
-                hour: '2-digit', minute: '2-digit', hour12: false,
-                timeZone: timeZone === 'local' ? undefined : timeZone
-            }).format(new Date(isoString));
-        } catch (e) { return '--:--'; }
-    }
-
-    function render() {
-        const q = searchInput.value.toLowerCase().trim();
-        const sLeague = leagueSelect.value;
-        const sTz = timezoneSelect.value || DEFAULT_TIMEZONE;
-        let html = '';
-        let hasMatches = false;
-
-        allMatches.forEach(ld => {
-            if (sLeague !== 'all' && ld.league !== sLeague) return;
-            const filtered = ld.matches.filter(m => m.home.toLowerCase().includes(q) || m.away.toLowerCase().includes(q));
-            
-            if (filtered.length > 0) {
-                hasMatches = true;
-                html += `<div class="ys-league-block"><div class="ys-league-header"><img src="${ld.leagueLogo}" class="ys-league-icon"><span class="ys-league-name">${ld.league}</span></div><div>`;
-                filtered.forEach(m => {
-                    const time = formatTime(m.time, sTz);
-                    const center = (m.status === 'scheduled') ? `<div class="ys-time">${time}</div>` : `<div class="ys-score">${m.score || '-'}</div>`;
-                    const statusLbl = (m.status==='live')?'مباشر':(m.status==='finished')?'انتهت':'قريباً';
-                    
-                    html += `<div class="ys-match-row">
-                        <div class="ys-team home"><span class="name">${m.home}</span><img src="${m.homeLogo}" width="32"></div>
-                        <div class="ys-match-center">${center}<span class="ys-status ${m.status}">${statusLbl}</span></div>
-                        <div class="ys-team away"><img src="${m.awayLogo}" width="32"><span class="name">${m.away}</span></div>
-                    </div>`;
-                });
-                html += `</div></div>`;
-            }
-        });
-        
-        if (allMatches.length === 0) {
-             container.innerHTML = '<div style="padding:2rem;text-align:center;">لا توجد مباريات مجدولة لهذا اليوم</div>';
-        } else {
-             container.innerHTML = hasMatches ? html : '<div style="padding:2rem;text-align:center;">لا توجد نتائج للبحث</div>';
-        }
-    }
-
-    // تعبئة القائمة
-    if (allMatches.length > 0) {
-        const leagues = [...new Set(allMatches.map(l => l.league))];
-        leagues.forEach(l => { const opt = document.createElement('option'); opt.value = l; opt.textContent = l; leagueSelect.appendChild(opt); });
-        render();
-    } else {
-        container.innerHTML = '<div style="padding:2rem;text-align:center;">لا توجد مباريات متاحة</div>';
-    }
-
-    searchInput.addEventListener('input', render);
-    leagueSelect.addEventListener('change', render);
-    timezoneSelect.addEventListener('change', render);
-});
-</script>
 """
 
 # =====================================================
-# 5. تحديث الصفحات (UPDATE PAGES)
+# 3. وظائف الجلب والمعالجة (LOGIC)
 # =====================================================
-def update_app_page(page_type, matches):
-    """
-    page_type: 'yesterday', 'today', 'tomorrow'
-    matches: قائمة المباريات من API
-    """
-    
-    # 1. إعداد المتغيرات حسب نوع الصفحة
-    if page_type == 'yesterday':
-        slug = "matches-yesterday"
-        title = "مباريات الأمس - النتائج النهائية"
-        # نضع active في المكان المناسب
-        act_y, act_t, act_tm = "active", "", ""
-        schema_desc = "نتائج مباريات الأمس وأهداف المباريات."
-        
-    elif page_type == 'today':
-        slug = "matches-today"
-        title = "مباريات اليوم - النتائج المباشرة"
-        act_y, act_t, act_tm = "", "active", ""
-        schema_desc = "جدول مباريات اليوم بتوقيت المغرب مع النتائج المباشرة."
-        
-    elif page_type == 'tomorrow':
-        slug = "matches-tomorrow"
-        title = "مباريات الغد - جدول المواعيد"
-        act_y, act_t, act_tm = "", "", "active"
-        schema_desc = "جدول مباريات الغد والقنوات الناقلة."
 
-    # 2. تحويل البيانات إلى JSON مناسب للتطبيق
-    leagues_map = {}
-    for m in matches:
-        league_name = m["league"]["name"]
-        league_logo = m["league"]["logo"]
-        
-        if league_name not in leagues_map:
-            leagues_map[league_name] = {
-                "league": league_name,
-                "leagueLogo": league_logo,
-                "matches": []
-            }
+def fetch_data(date_str):
+    print(f"📡 جلب بيانات: {date_str}...")
+    params = {"date": date_str, "timezone": "Africa/Casablanca"}
+    try:
+        r = requests.get(FOOTBALL_API_URL, headers={"x-apisports-key": FOOTBALL_API_KEY}, params=params)
+        return r.json().get("response", [])
+    except Exception as e:
+        print(f"❌ خطأ API: {e}")
+        return []
+
+def get_page_id(slug):
+    r = requests.get(f"{WP_API}/pages", params={"slug": slug}, headers=get_wp_headers())
+    return r.json()[0]["id"] if r.status_code == 200 and r.json() else None
+
+def process_and_update(day_type, raw_data):
+    # 1. التواريخ والعناوين
+    config = {
+        "yesterday": {"slug": "matches-yesterday", "title": "نتائج مباريات الأمس"},
+        "today":     {"slug": "matches-today",     "title": "جدول مباريات اليوم مباشر"},
+        "tomorrow":  {"slug": "matches-tomorrow",  "title": "جدول مباريات الغد"}
+    }
+    
+    # 2. تصفية البيانات وترتيبها حسب الدوريات
+    leagues = {}
+    for item in raw_data:
+        lname = item["league"]["name"]
+        if lname not in leagues:
+            leagues[lname] = {"league": lname, "logo": item["league"]["logo"], "matches": []}
         
         # تحويل حالة المباراة
-        short_status = m["fixture"]["status"]["short"]
-        app_status = "scheduled"
-        if short_status in ["FT", "AET", "PEN"]: app_status = "finished"
-        elif short_status in ["1H", "HT", "2H", "ET", "P", "LIVE"]: app_status = "live"
+        api_status = item["fixture"]["status"]["short"]
+        stat = "scheduled"
+        if api_status in ["FT", "AET", "PEN"]: stat = "finished"
+        elif api_status in ["1H", "HT", "2H", "LIVE"]: stat = "live"
         
-        score_display = None
-        if m["goals"]["home"] is not None:
-            score_display = f"{m['goals']['home']} - {m['goals']['away']}"
+        # التوقيت
+        dt = datetime.fromisoformat(item["fixture"]["date"].replace('Z', '+00:00'))
+        time_str = dt.astimezone(timezone(timedelta(hours=1))).strftime("%H:%M")
 
-        leagues_map[league_name]["matches"].append({
-            "home": m["teams"]["home"]["name"],
-            "homeLogo": m["teams"]["home"]["logo"],
-            "away": m["teams"]["away"]["name"],
-            "awayLogo": m["teams"]["away"]["logo"],
-            "time": m["fixture"]["date"],
-            "status": app_status,
-            "score": score_display
+        leagues[lname]["matches"].append({
+            "home": item["teams"]["home"]["name"],
+            "hLogo": item["teams"]["home"]["logo"],
+            "away": item["teams"]["away"]["name"],
+            "aLogo": item["teams"]["away"]["logo"],
+            "time": time_str,
+            "stat": stat,
+            "score": f"{item['goals']['home']}-{item['goals']['away']}" if item["goals"]["home"] is not None else None
         })
 
-    # تحويل القائمة إلى JSON String
-    app_data_json = json.dumps(list(leagues_map.values()), ensure_ascii=False)
+    # 3. تشفير البيانات Base64 (هذا هو السر لعدم كسر الكود)
+    json_bytes = json.dumps(list(leagues.values()), ensure_ascii=False).encode('utf-8')
+    b64_str = base64.b64encode(json_bytes).decode('utf-8')
 
-    # 3. دمج البيانات مع القالب باستخدام REPLACE (أكثر أماناً)
-    # نقوم بنسخ القالب الخام أولاً
-    final_html = HTML_TEMPLATE_RAW
+    # 4. دمج البيانات في القالب
+    final_html = HTML_TEMPLATE.replace("__B64_PAYLOAD__", b64_str)
+    for d in ["yesterday", "today", "tomorrow"]:
+        final_html = final_html.replace(f"__ACT_{d.upper()}__", "active" if day_type == d else "")
+
+    # 5. الإرسال لووردبريس
+    slug = config[day_type]["slug"]
+    payload = {"title": config[day_type]["title"], "content": final_html, "status": "publish"}
     
-    # استبدال العلامات بالقيم الحقيقية
-    final_html = final_html.replace("__ACT_YESTERDAY__", act_y)
-    final_html = final_html.replace("__ACT_TODAY__", act_t)
-    final_html = final_html.replace("__ACT_TOMORROW__", act_tm)
-    final_html = final_html.replace("__JSON_DATA__", app_data_json)
-
-    # 4. إضافة SCHEMA (مفصولة عن القالب)
-    schema_str = f"""
-    <script type="application/ld+json">
-    {{
-       "@context" : "https://schema.org",
-       "@graph" : [
-          {{
-             "@type" : "CollectionPage",
-             "@id" : "{WP_BASE}/{slug}/#webpage",
-             "url" : "{WP_BASE}/{slug}/",
-             "name" : "{title}",
-             "description" : "{schema_desc}",
-             "inLanguage" : "ar",
-             "isPartOf" : {{ "@id" : "{WP_BASE}/#website" }}
-          }},
-          {{
-             "@type" : "WebSite",
-             "@id" : "{WP_BASE}/#website",
-             "url" : "{WP_BASE}/",
-             "name" : "Yassin TV App"
-          }}
-       ]
-    }}
-    </script>
-    """
-    
-    full_content = final_html + schema_str
-
-    payload = {
-        "title": title,
-        "slug": slug,
-        "status": "publish",
-        "content": full_content
-    }
-
-    if existing_id := get_post_id_by_slug(slug, "pages"):
-        print(f"Updating Hub [{page_type}]: {slug}")
-        wp_request("POST", f"/pages/{existing_id}", json=payload)
+    pid = get_page_id(slug)
+    if pid:
+        print(f"🔄 تحديث صفحة {slug} (ID: {pid})")
+        requests.post(f"{WP_API}/pages/{pid}", headers=get_wp_headers(), json=payload)
     else:
-        print(f"Creating Hub [{page_type}]: {slug}")
-        wp_request("POST", "/pages", json=payload)
+        print(f"🆕 إنشاء صفحة {slug}")
+        payload["slug"] = slug
+        requests.post(f"{WP_API}/pages", headers=get_wp_headers(), json=payload)
 
 # =====================================================
-# 6. التشغيل الرئيسي (MAIN RUNNER)
+# 4. التشغيل الرئيسي (MAIN)
 # =====================================================
-def main():
-    print("--- STARTING 3-DAY BOT (SAFE TEMPLATE) ---")
-    print_env_status()
-    assert_auth_config()
-    test_wp_auth()
-    
-    # تعريف التواريخ
-    today_date = datetime.now(timezone.utc)
-    dates = {
-        "yesterday": (today_date - timedelta(days=1)).strftime("%Y-%m-%d"),
-        "today": today_date.strftime("%Y-%m-%d"),
-        "tomorrow": (today_date + timedelta(days=1)).strftime("%Y-%m-%d")
-    }
-    
-    for day_name, date_str in dates.items():
-        print(f"\n>>> Processing {day_name.upper()} ({date_str})")
-        
-        matches = get_fixtures(date_str)
-        
-        if not matches:
-            print(f"No matches found for {day_name}. Publishing empty table.")
-        
-        try:
-            update_app_page(day_name, matches)
-        except Exception as e:
-            print(f"Error updating Hub {day_name}: {e}")
-
-    print("\n--- RUN COMPLETE ---")
-
 if __name__ == "__main__":
-    main()
+    now = datetime.now(timezone(timedelta(hours=1)))
+    days_map = {
+        "yesterday": (now - timedelta(days=1)).strftime("%Y-%m-%d"),
+        "today":     now.strftime("%Y-%m-%d"),
+        "tomorrow":  (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    }
+
+    print("🚀 بدء تشغيل الألتيميت بوت...")
+    for day_type, date_str in days_map.items():
+        data = fetch_data(date_str)
+        process_and_update(day_type, data)
+    
+    print("✅ تم تحديث جميع الصفحات بنجاح!")
