@@ -15,7 +15,7 @@ WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY", "").strip()
 FOOTBALL_API_URL = "https://v3.football.api-sports.io/fixtures"
 
-# وسعنا القائمة لتشمل أهم البطولات العالمية والعربية
+# البطولات المفضلة
 PRIORITY_LEAGUES = [39, 140, 135, 78, 61, 2, 3, 1, 4, 9, 200, 480, 529, 531, 202]
 
 def get_wp_headers():
@@ -23,7 +23,7 @@ def get_wp_headers():
     return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
 
 # =====================================================
-# 2. القالب المطور (Robust Template)
+# 2. القالب (HTML + CSS + JS)
 # =====================================================
 HTML_TEMPLATE = r"""<div id="ys-match-app" class="ys-container" dir="rtl">
     <div class="ys-nav">
@@ -54,12 +54,11 @@ HTML_TEMPLATE = r"""<div id="ys-match-app" class="ys-container" dir="rtl">
     function init() {
         try {
             const b64 = rawDataElement.value.trim();
-            if (!b64) {
+            if (!b64 || b64 === "__B64_DATA__") {
                 display.innerHTML = '<div class="ys-message">لا توجد بيانات متوفرة حالياً</div>';
                 return;
             }
 
-            // فك التشفير يدويًا لضمان دعم اللغة العربية في كل المتصفحات
             const binaryString = atob(b64);
             const bytes = new Uint8Array(binaryString.length);
             for (let i = 0; i < binaryString.length; i++) {
@@ -70,8 +69,8 @@ HTML_TEMPLATE = r"""<div id="ys-match-app" class="ys-container" dir="rtl">
             
             render();
         } catch (err) {
-            console.error(err);
-            display.innerHTML = '<div class="ys-message">حدث خطأ أثناء معالجة البيانات. حاول تحديث الصفحة.</div>';
+            console.error("JS Error:", err);
+            display.innerHTML = '<div class="ys-message">حدث خطأ في معالجة البيانات</div>';
         }
     }
 
@@ -102,7 +101,7 @@ HTML_TEMPLATE = r"""<div id="ys-match-app" class="ys-container" dir="rtl">
             }
         });
 
-        display.innerHTML = found ? html : '<div class="ys-message">لا توجد مباريات مطابقة للبحث</div>';
+        display.innerHTML = found ? html : '<div class="ys-message">لا توجد مباريات مطابقة</div>';
     }
 
     searchInput.addEventListener('input', e => render(e.target.value));
@@ -116,7 +115,7 @@ HTML_TEMPLATE = r"""<div id="ys-match-app" class="ys-container" dir="rtl">
 .ys-tab { flex: 1; text-align: center; padding: 12px; background: #f8f9fa; border-radius: 8px; text-decoration: none; color: #555; font-weight: bold; font-size: 14px; border: 1px solid #eee; }
 .ys-tab.active { background: #e60023; color: #fff; border-color: #e60023; }
 .ys-search input { width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 15px; box-sizing: border-box; }
-.league-box { border: 1px solid #f0f0f0; border-radius: 10px; margin-bottom: 15px; overflow: hidden; }
+.league-box { border: 1px solid #f0f0f0; border-radius: 10px; margin-bottom: 15px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }
 .league-title { background: #f8f8f8; padding: 10px; font-size: 13px; font-weight: bold; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #f0f0f0; }
 .match-card { display: flex; align-items: center; padding: 12px 8px; border-bottom: 1px solid #fafafa; }
 .team { flex: 1; display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: bold; }
@@ -129,19 +128,24 @@ HTML_TEMPLATE = r"""<div id="ys-match-app" class="ys-container" dir="rtl">
 .badge.finished { background: #eee; color: #888; }
 .badge.scheduled { background: #e3f2fd; color: #1976d2; }
 .ys-message { padding: 40px; text-align: center; color: #999; }
-@media (max-width: 480px) { .team span { font-size: 11px; } .score { font-size: 14px; } }
+@media (max-width: 480px) { .team span { font-size: 11px; } .score { font-size: 14px; } .info { width: 70px; } }
 </style>
 """
 
 # =====================================================
-# 3. الوظائف البرمجية
+# 3. الوظائف البرمجية (المصححة)
 # =====================================================
 
 def fetch_matches(date_str):
     print(f"📡 Fetching: {date_str}")
     params = {"date": date_str, "timezone": "Africa/Casablanca"}
-    r = requests.get(FOOTBALL_API_URL, headers={"x-apisports-key": FOOTBALL_API_KEY}, params=params)
-    return r.json().get("response", [])
+    try:
+        r = requests.get(FOOTBALL_API_URL, headers={"x-apisports-key": FOOTBALL_API_KEY}, params=params)
+        r.raise_for_status()
+        return r.json().get("response", [])
+    except Exception as e:
+        print(f"❌ API Error for {date_str}: {e}")
+        return []
 
 def update_wp_page(day_type, raw_data):
     slugs = {"yesterday": "matches-yesterday", "today": "matches-today", "tomorrow": "matches-tomorrow"}
@@ -149,15 +153,17 @@ def update_wp_page(day_type, raw_data):
     
     leagues = {}
     for m in raw_data:
-        # تصفية البطولات (إذا كانت القائمة كبيرة نأخذ الكل، إذا أردت الاختصار فعل PRIORITY_LEAGUES)
         lname = m["league"]["name"]
         if lname not in leagues:
             leagues[lname] = {"league": lname, "logo": m["league"]["logo"], "matches": []}
         
-        api_stat = m["fixture"]["status"]["short"]
+        # تصحيح الخطأ هنا (استخدام api_status بشكل موحد)
+        api_status = m["fixture"]["status"]["short"]
         stat = "scheduled"
-        if api_stat in ["FT", "AET", "PEN"]: stat = "finished"
-        elif api_status in ["1H", "HT", "2H", "LIVE", "BT"]: stat = "live"
+        if api_status in ["FT", "AET", "PEN"]:
+            stat = "finished"
+        elif api_status in ["1H", "HT", "2H", "LIVE", "BT"]:
+            stat = "live"
         
         dt = datetime.fromisoformat(m["fixture"]["date"].replace('Z', '+00:00'))
         time_str = dt.astimezone(timezone(timedelta(hours=1))).strftime("%H:%M")
@@ -179,17 +185,20 @@ def update_wp_page(day_type, raw_data):
 
     # تحديث ووردبريس
     slug = slugs[day_type]
-    r = requests.get(f"{WP_API}/pages", params={"slug": slug}, headers=get_wp_headers())
+    headers = get_wp_headers()
+    
+    r = requests.get(f"{WP_API}/pages", params={"slug": slug}, headers=headers)
     page_id = r.json()[0]["id"] if r.status_code == 200 and r.json() else None
     
     payload = {"title": titles[day_type], "content": final_content, "status": "publish"}
+    
     if page_id:
-        print(f"✅ Update Page: {slug}")
-        requests.post(f"{WP_API}/pages/{page_id}", headers=get_wp_headers(), json=payload)
+        print(f"✅ Updating Page: {slug} (ID: {page_id})")
+        requests.post(f"{WP_API}/pages/{page_id}", headers=headers, json=payload)
     else:
-        print(f"🆕 Create Page: {slug}")
+        print(f"🆕 Creating New Page: {slug}")
         payload["slug"] = slug
-        requests.post(f"{WP_API}/pages", headers=get_wp_headers(), json=payload)
+        requests.post(f"{WP_API}/pages", headers=headers, json=payload)
 
 # =====================================================
 # 4. RUN
@@ -201,7 +210,8 @@ if __name__ == "__main__":
         "today": now.strftime("%Y-%m-%d"),
         "tomorrow": (now + timedelta(days=1)).strftime("%Y-%m-%d")
     }
+    print("🚀 Bot Started...")
     for d_type, d_str in days.items():
         data = fetch_matches(d_str)
         update_wp_page(d_type, data)
-    print("🚀 All Done!")
+    print("🚀 Run Complete!")
