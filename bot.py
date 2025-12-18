@@ -2,214 +2,231 @@ import os
 import requests
 import base64
 import json
-import time
 from datetime import datetime, timezone, timedelta
 
 # =====================================================
-# 1. الإعدادات المحسنة
+# 1. إعدادات الدوريات (Arab, Europe, Nations)
 # =====================================================
+# قمت بتنظيم المعرفات لضمان ظهور ما تهتم به أولاً
+ARAB_LEAGUES = [200, 307, 233, 202, 531, 12, 17] # المغرب، السعودية، مصر، الإمارات، أبطال العرب، أبطال أفريقيا، أبطال آسيا
+EUROPE_LEAGUES = [39, 140, 135, 78, 61, 2, 3]    # إنجلترا، إسبانيا، إيطاليا، ألمانيا، فرنسا، أبطال أوروبا، الدوري الأوروبي
+NATIONS_LEAGUES = [1, 4, 9, 34, 10, 20, 21]      # كأس العالم، اليورو، كوبا أمريكا، أمم أفريقيا، وديات دولية، تصفيات
+
+ALL_INTERESTED_LEAGUES = ARAB_LEAGUES + EUROPE_LEAGUES + NATIONS_LEAGUES
+
+# إعدادات WP و API
 WP_BASE = os.environ["WP_URL"].rstrip("/")
 WP_API = f"{WP_BASE}/wp-json/wp/v2"
 WP_USER = os.environ.get("WP_USER", "").strip()
 WP_APP_PASSWORD = os.environ.get("WP_APP_PASSWORD", "").strip()
 FOOTBALL_API_KEY = os.environ.get("FOOTBALL_API_KEY", "").strip()
-FOOTBALL_API_URL = "https://v3.football.api-sports.io/fixtures"
-
-# إضافة معرفات الدوريات العربية والنهائيات (ضمان ظهور النهائي العربي)
-# 531: Arab Club Champions Cup, 200: Morocco, 307: Saudi, 233: Egypt, 12: CAF Champions, 17: AFC Champions
-PRIORITY_LEAGUES = [39, 140, 135, 78, 61, 2, 3, 1, 4, 9, 200, 480, 529, 531, 202, 307, 233, 12, 17, 141, 143]
 
 def get_wp_headers():
     token = base64.b64encode(f"{WP_USER}:{WP_APP_PASSWORD.replace(' ', '')}".encode()).decode()
     return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
 
 # =====================================================
-# 2. القالب الفولاذي (Anti-Breakage Template)
+# 2. القالب المستوحى من الـ Widgets (HTML/CSS)
 # =====================================================
-HTML_TEMPLATE = r"""<div id="ys-match-app" class="ys-container" dir="rtl" data-payload="__B64_DATA__">
-    <div class="ys-nav">
-        <a href="/matches-yesterday/" class="ys-tab __ACT_YESTERDAY__">الأمس</a>
-        <a href="/matches-today/" class="ys-tab __ACT_TODAY__">اليوم</a>
-        <a href="/matches-tomorrow/" class="ys-tab __ACT_TOMORROW__">الغد</a>
+HTML_TEMPLATE = r"""<div id="ultimate-match-center" class="match-center-wrapper" dir="rtl">
+    <div class="center-nav">
+        <a href="/matches-yesterday/" class="nav-item __ACT_YESTERDAY__">الأمس</a>
+        <a href="/matches-today/" class="nav-item __ACT_TODAY__">مباريات اليوم</a>
+        <a href="/matches-tomorrow/" class="nav-item __ACT_TOMORROW__">الغد</a>
     </div>
 
-    <div class="ys-search">
-        <input type="text" id="ys-search-input" placeholder="بحث عن فريق أو دوري...">
+    <div class="search-container">
+        <input type="text" id="match-search" placeholder="ابحث عن فريق، بطولة، أو دوري...">
     </div>
 
-    <div id="ys-display-area">
-        <div class="ys-message">جاري فحص البيانات...</div>
+    <div id="matches-container">
+        <div class="loading-state">جاري ترتيب المباريات...</div>
     </div>
 </div>
 
 <script>
 (function() {
-    const app = document.getElementById('ys-match-app');
-    const display = document.getElementById('ys-display-area');
-    const searchInput = document.getElementById('ys-search-input');
-    
-    function init() {
-        try {
-            const b64 = app.getAttribute('data-payload');
-            if (!b64 || b64.length < 10) {
-                display.innerHTML = '<div class="ys-message">⚠️ لم يتم استلام أي بيانات من البوت. تأكد من تشغيل bot.py بنجاح.</div>';
-                return;
-            }
+    const DATA = __JSON_DATA__;
+    const container = document.getElementById('matches-container');
+    const searchInput = document.getElementById('match-search');
 
-            // فك التشفير مع دعم UTF-8
-            const binaryString = atob(b64);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) bytes[i] = binaryString.charCodeAt(i);
-            const decodedText = new TextDecoder('utf-8').decode(bytes);
-            const leagues = JSON.parse(decodedText);
-            
-            if (leagues.length === 0) {
-                display.innerHTML = '<div class="ys-message">لا توجد مباريات هامة مجدولة لهذا اليوم حسب القائمة المختارة.</div>';
-                return;
-            }
+    function renderMatches(filter = "") {
+        if (!DATA || DATA.length === 0) {
+            container.innerHTML = '<div class="no-matches">لا توجد مباريات هامة مجدولة حالياً</div>';
+            return;
+        }
 
-            function render(filter = "") {
-                let html = '';
-                let found = false;
-                leagues.forEach(lg => {
-                    const filtered = lg.matches.filter(m => 
-                        m.home.includes(filter) || m.away.includes(filter) || lg.league.includes(filter)
-                    );
-                    if (filtered.length > 0) {
-                        found = true;
-                        html += `<div class="league-box">
-                            <div class="league-title"><img src="${lg.logo}" width="18" loading="lazy"> ${lg.league}</div>
-                            ${filtered.map(m => `
-                                <div class="match-card">
-                                    <div class="team h"><span>${m.home}</span><img src="${m.hLogo}" width="24" loading="lazy"></div>
-                                    <div class="info">
-                                        <div class="score ${m.stat}">${m.stat==='scheduled' ? m.time : (m.score || '0-0')}</div>
-                                        <div class="badge ${m.stat}">${m.stat==='live'?'مباشر':(m.stat==='finished'?'انتهت':'قريباً')}</div>
+        let html = '';
+        DATA.forEach(group => {
+            const filteredLeagues = group.leagues.filter(lg => {
+                const matchesMatch = lg.matches.filter(m => 
+                    m.home.toLowerCase().includes(filter.toLowerCase()) || 
+                    m.away.toLowerCase().includes(filter.toLowerCase())
+                );
+                return lg.name.toLowerCase().includes(filter.toLowerCase()) || matchesMatch.length > 0;
+            });
+
+            if (filteredLeagues.length > 0) {
+                html += `<div class="group-section">
+                    <h2 class="group-title">${group.category}</h2>`;
+                
+                filteredLeagues.forEach(lg => {
+                    html += `
+                    <div class="league-card">
+                        <div class="league-header">
+                            <img src="${lg.logo}" width="22" height="22">
+                            <span>${lg.name}</span>
+                        </div>
+                        <div class="match-list">
+                            ${lg.matches.map(m => `
+                                <div class="match-row">
+                                    <div class="team home">
+                                        <span class="team-name">${m.home}</span>
+                                        <img src="${m.hLogo}" width="24" height="24">
                                     </div>
-                                    <div class="team a"><img src="${m.aLogo}" width="24" loading="lazy"><span>${m.away}</span></div>
+                                    <div class="match-meta">
+                                        <div class="score-pill ${m.status}">
+                                            ${m.status === 'scheduled' ? m.time : (m.score || '0 - 0')}
+                                        </div>
+                                        <div class="status-label ${m.status}">
+                                            ${m.status === 'live' ? 'مباشر' : (m.status === 'finished' ? 'انتهت' : 'قريباً')}
+                                        </div>
+                                    </div>
+                                    <div class="team away">
+                                        <img src="${m.aLogo}" width="24" height="24">
+                                        <span class="team-name">${m.away}</span>
+                                    </div>
                                 </div>
                             `).join('')}
-                        </div>`;
-                    }
+                        </div>
+                    </div>`;
                 });
-                display.innerHTML = found ? html : '<div class="ys-message">لا توجد نتائج مطابقة لبحثك</div>';
+                html += `</div>`;
             }
-
-            searchInput.addEventListener('input', e => render(e.target.value));
-            render();
-
-        } catch (err) {
-            console.error("Critical JS Error:", err);
-            display.innerHTML = '<div class="ys-message">❌ خطأ تقني: ووردبريس قام بتعطيل كود البيانات. حاول مسح الكاش.</div>';
-        }
+        });
+        container.innerHTML = html || '<div class="no-matches">لم يتم العثور على نتائج للبحث</div>';
     }
-    
-    // تشغيل التطبيق
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
-    } else {
-        init();
-    }
+
+    searchInput.addEventListener('input', (e) => renderMatches(e.target.value));
+    renderMatches();
 })();
 </script>
 
 <style>
-.ys-container { max-width: 700px; margin: 20px auto; font-family: -apple-system, sans-serif; background: #fff; border: 1px solid #eee; border-radius: 12px; padding: 15px; color: #333; box-shadow: 0 4px 15px rgba(0,0,0,0.05); }
-.ys-nav { display: flex; gap: 8px; margin-bottom: 20px; }
-.ys-tab { flex: 1; text-align: center; padding: 12px; background: #f8f9fa; border-radius: 8px; text-decoration: none; color: #555; font-weight: bold; font-size: 14px; border: 1px solid #eee; transition: 0.2s; }
-.ys-tab.active { background: #e60023; color: #fff; border-color: #e60023; }
-.ys-search input { width: 100%; padding: 14px; border: 1px solid #ddd; border-radius: 8px; margin-bottom: 20px; box-sizing: border-box; font-size: 15px; outline: none; }
-.league-box { border: 1px solid #f0f0f0; border-radius: 10px; margin-bottom: 20px; overflow: hidden; }
-.league-title { background: #f8f8f8; padding: 12px; font-size: 13px; font-weight: bold; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #f0f0f0; }
-.match-card { display: flex; align-items: center; padding: 15px 10px; border-bottom: 1px solid #fafafa; }
-.team { flex: 1; display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: bold; }
-.team.h { justify-content: flex-end; text-align: left; }
-.info { width: 90px; text-align: center; }
-.score { font-size: 18px; font-weight: 900; color: #000; }
-.score.scheduled { font-size: 14px; color: #777; font-weight: normal; }
-.badge { font-size: 10px; padding: 2px 8px; border-radius: 4px; display: inline-block; margin-top: 5px; font-weight: bold; }
-.badge.live { background: #ff0000; color: #fff; animation: ys-fade 1s infinite; }
-.badge.finished { background: #eee; color: #888; }
-.badge.scheduled { background: #e3f2fd; color: #1976d2; }
-.ys-message { padding: 50px 20px; text-align: center; color: #666; font-size: 14px; line-height: 1.6; }
-@keyframes ys-fade { 50% { opacity: 0.5; } }
-@media (max-width: 480px) { .team span { font-size: 11px; } .score { font-size: 15px; } .info { width: 75px; } }
+.match-center-wrapper { max-width: 800px; margin: auto; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background: #fdfdfd; padding: 15px; border-radius: 15px; color: #222; }
+.center-nav { display: flex; gap: 8px; margin-bottom: 20px; }
+.nav-item { flex: 1; text-align: center; padding: 14px; background: #fff; border: 1px solid #eee; border-radius: 10px; text-decoration: none; color: #555; font-weight: bold; font-size: 14px; transition: 0.3s; }
+.nav-item.active { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+.search-container input { width: 100%; padding: 15px; border: 2px solid #f0f0f0; border-radius: 12px; margin-bottom: 20px; box-sizing: border-box; outline: none; font-size: 15px; }
+.search-container input:focus { border-color: #e60023; }
+.group-title { font-size: 18px; color: #e60023; margin: 25px 0 15px; border-right: 4px solid #e60023; padding-right: 12px; }
+.league-card { background: #fff; border: 1px solid #f0f0f0; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.02); overflow: hidden; }
+.league-header { background: #f8f9fa; padding: 12px 15px; display: flex; align-items: center; gap: 10px; font-weight: bold; font-size: 14px; border-bottom: 1px solid #f0f0f0; }
+.match-row { display: flex; align-items: center; padding: 18px 10px; border-bottom: 1px solid #f9f9f9; transition: 0.2s; }
+.match-row:hover { background: #fffcfc; }
+.team { flex: 1; display: flex; align-items: center; gap: 12px; }
+.team.home { justify-content: flex-end; text-align: left; }
+.team.away { justify-content: flex-start; text-align: right; }
+.team-name { font-weight: 700; font-size: 14px; }
+.match-meta { width: 100px; text-align: center; }
+.score-pill { font-size: 18px; font-weight: 900; color: #000; letter-spacing: -0.5px; }
+.score-pill.scheduled { font-size: 14px; color: #666; font-weight: 600; }
+.status-label { font-size: 10px; font-weight: bold; margin-top: 4px; padding: 2px 8px; border-radius: 20px; display: inline-block; }
+.status-label.live { background: #ff0000; color: #fff; animation: blinker 1s linear infinite; }
+.status-label.finished { background: #eee; color: #888; }
+.status-label.scheduled { background: #e8f4ff; color: #007bff; }
+@keyframes blinker { 50% { opacity: 0; } }
+@media (max-width: 600px) { .team-name { font-size: 12px; } .score-pill { font-size: 15px; } .match-meta { width: 80px; } }
 </style>
 """
 
 # =====================================================
-# 3. الوظائف المنطقية
+# 3. معالجة البيانات (Smart Logic)
 # =====================================================
 
-def fetch_matches(date_str):
-    print(f"📡 Fetching data for: {date_str}")
-    params = {"date": date_str, "timezone": "Africa/Casablanca"}
-    try:
-        r = requests.get(FOOTBALL_API_URL, headers={"x-apisports-key": FOOTBALL_API_KEY}, params=params)
-        r.raise_for_status()
-        return r.json().get("response", [])
-    except Exception as e:
-        print(f"❌ API Error: {e}")
-        return []
+def fetch_data(date_str):
+    print(f"📡 جلب بيانات {date_str}...")
+    headers = {"x-apisports-key": FOOTBALL_API_KEY}
+    r = requests.get("https://v3.football.api-sports.io/fixtures", headers=headers, params={"date": date_str, "timezone": "Africa/Casablanca"})
+    return r.json().get("response", [])
 
-def update_wp_page(day_type, raw_data):
-    slugs = {"yesterday": "matches-yesterday", "today": "matches-today", "tomorrow": "matches-tomorrow"}
-    titles = {"yesterday": "مباريات الأمس", "today": "مباريات اليوم", "tomorrow": "مباريات الغد"}
-    
-    leagues_data = {}
-    for m in raw_data:
-        # إذا كنت تريد عرض كل المباريات دون استثناء، عطل الشرط التالي:
-        if m["league"]["id"] not in PRIORITY_LEAGUES:
-            continue
-            
-        lname = m["league"]["name"]
-        if lname not in leagues_data:
-            leagues_data[lname] = {"league": lname, "logo": m["league"]["logo"], "matches": []}
+def build_data_structure(fixtures):
+    # تقسيم البيانات لثلاث فئات
+    categories = {
+        "Arab": {"category": "🏆 البطولات العربية والدولية", "leagues": {}},
+        "Europe": {"category": "🇪🇺 الدوريات الأوروبية الكبرى", "leagues": {}},
+        "Nations": {"category": "🌍 المنتخبات والبطولات القارية", "leagues": {}}
+    }
+
+    for f in fixtures:
+        l_id = f["league"]["id"]
+        # تحديد الفئة
+        cat_key = None
+        if l_id in ARAB_LEAGUES: cat_key = "Arab"
+        elif l_id in EUROPE_LEAGUES: cat_key = "Europe"
+        elif l_id in NATIONS_LEAGUES: cat_key = "Nations"
         
-        api_status = m["fixture"]["status"]["short"]
-        stat = "scheduled"
-        if api_status in ["FT", "AET", "PEN"]: stat = "finished"
-        elif api_status in ["1H", "HT", "2H", "LIVE", "BT"]: stat = "live"
+        if not cat_key: continue
+
+        lname = f["league"]["name"]
+        if lname not in categories[cat_key]["leagues"]:
+            categories[cat_key]["leagues"][lname] = {"name": lname, "logo": f["league"]["logo"], "matches": []}
         
-        # تحويل التوقيت
-        dt = datetime.fromisoformat(m["fixture"]["date"].replace('Z', '+00:00'))
+        status = "scheduled"
+        if f["fixture"]["status"]["short"] in ["FT", "AET", "PEN"]: status = "finished"
+        elif f["fixture"]["status"]["short"] in ["1H", "HT", "2H", "LIVE", "BT"]: status = "live"
+
+        dt = datetime.fromisoformat(f["fixture"]["date"].replace('Z', '+00:00'))
         time_str = dt.astimezone(timezone(timedelta(hours=1))).strftime("%H:%M")
 
-        leagues_data[lname]["matches"].append({
-            "home": m["teams"]["home"]["name"], "hLogo": m["teams"]["home"]["logo"],
-            "away": m["teams"]["away"]["name"], "aLogo": m["teams"]["away"]["logo"],
-            "time": time_str, "stat": stat,
-            "score": f"{m['goals']['home']}-{m['goals']['away']}" if m["goals"]["home"] is not None else None
+        categories[cat_key]["leagues"][lname]["matches"].append({
+            "home": f["teams"]["home"]["name"], "hLogo": f["teams"]["home"]["logo"],
+            "away": f["teams"]["away"]["name"], "aLogo": f["teams"]["away"]["logo"],
+            "time": time_str, "status": status,
+            "score": f"{f['goals']['home']} - {f['goals']['away']}" if f["goals"]["home"] is not None else None
         })
 
-    # تحويل البيانات لـ Base64
-    json_str = json.dumps(list(leagues_data.values()), ensure_ascii=False)
-    b64_data = base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
+    # تحويل القواميس إلى قوائم مرتبة
+    final_data = []
+    for key in ["Arab", "Europe", "Nations"]:
+        if categories[key]["leagues"]:
+            cat_node = {
+                "category": categories[key]["category"],
+                "leagues": list(categories[key]["leagues"].values())
+            }
+            final_data.append(cat_node)
+    return final_data
 
-    # بناء المحتوى النهائي
-    content = HTML_TEMPLATE.replace("__B64_DATA__", b64_data)
+def update_page(day_type, data_list):
+    slugs = {"yesterday": "matches-yesterday", "today": "matches-today", "tomorrow": "matches-tomorrow"}
+    titles = {"yesterday": "نتائج مباريات الأمس", "today": "مباريات اليوم مباشر", "tomorrow": "جدول مباريات الغد"}
+    
+    # تحويل البيانات لـ JSON وإدراجها في القالب
+    json_payload = json.dumps(data_list, ensure_ascii=False)
+    content = HTML_TEMPLATE.replace("__JSON_DATA__", json_payload)
+    
+    # تفعيل الزر المناسب
     for d in ["yesterday", "today", "tomorrow"]:
         content = content.replace(f"__ACT_{d.upper()}__", "active" if day_type == d else "")
 
-    # تحديث ووردبريس
     slug = slugs[day_type]
     headers = get_wp_headers()
     
+    # البحث عن الصفحة أو إنشاؤها
     r = requests.get(f"{WP_API}/pages", params={"slug": slug}, headers=headers)
     page_id = r.json()[0]["id"] if r.status_code == 200 and r.json() else None
     
     payload = {"title": titles[day_type], "content": content, "status": "publish"}
-    
     if page_id:
-        print(f"✅ Updating {slug} (Matches: {len(raw_data)})")
+        print(f"✅ تحديث صفحة: {slug}")
         requests.post(f"{WP_API}/pages/{page_id}", headers=headers, json=payload)
     else:
-        print(f"🆕 Creating {slug}")
+        print(f"🆕 إنشاء صفحة: {slug}")
         payload["slug"] = slug
         requests.post(f"{WP_API}/pages", headers=headers, json=payload)
 
 # =====================================================
-# 4. التنفيذ
+# 4. التشغيل
 # =====================================================
 if __name__ == "__main__":
     now = datetime.now(timezone(timedelta(hours=1)))
@@ -218,7 +235,8 @@ if __name__ == "__main__":
         "today": now.strftime("%Y-%m-%d"),
         "tomorrow": (now + timedelta(days=1)).strftime("%Y-%m-%d")
     }
-    for d_type, d_str in days.items():
-        data = fetch_matches(d_str)
-        update_wp_page(d_type, data)
-    print("🚀 Done! Please clear your LiteSpeed cache now.")
+    for d_type, d_date in days.items():
+        raw = fetch_data(d_date)
+        structured = build_data_structure(raw)
+        update_page(d_type, structured)
+    print("🚀 تم تحديث المركز الرياضي بنجاح!")
