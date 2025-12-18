@@ -1,3 +1,4 @@
+# .github/workflows/daily-update.yml
 name: Football Scores Auto-Update
 
 on:
@@ -5,30 +6,31 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch:
 
+concurrency:
+  group: football-update-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   update-scores:
     runs-on: ubuntu-latest
-    timeout-minutes: 5 
+    timeout-minutes: 5
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          # تم حذف سطر الكاش هنا لإصلاح الخطأ
 
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
+      - name: Install dependencies
+        run: pip install requests
 
-      - name: Execute Bot
+      - name: Run Bot
         env:
           WP_URL: ${{ secrets.WP_URL }}
           WP_USER: ${{ secrets.WP_USER }}
           WP_APP_PASSWORD: ${{ secrets.WP_APP_PASSWORD }}
           FOOTBALL_API_KEY: ${{ secrets.FOOTBALL_API_KEY }}
-        run: python bot.py
+        run: python -u bot.py
