@@ -2,14 +2,12 @@ name: Football Scores Auto-Update
 
 on:
   schedule:
-    # Runs every 30 minutes to capture live score changes
     - cron: "*/30 * * * *"
-  workflow_dispatch: # Allows you to run it manually via the 'Actions' tab
+  workflow_dispatch:
 
 jobs:
   update-scores:
     runs-on: ubuntu-latest
-    # Terminate if it hangs to save minutes
     timeout-minutes: 5 
 
     steps:
@@ -20,7 +18,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: 'pip' # Speeds up subsequent runs
+          # تم حذف سطر الكاش هنا لإصلاح الخطأ
 
       - name: Install Dependencies
         run: |
